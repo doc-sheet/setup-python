@@ -3218,6 +3218,10 @@ function checkBypass(reqUrl) {
     if (!reqUrl.hostname) {
         return false;
     }
+    const reqHost = reqUrl.hostname;
+    if (isLoopbackAddress(reqHost)) {
+        return true;
+    }
     const noProxy = process.env['no_proxy'] || process.env['NO_PROXY'] || '';
     if (!noProxy) {
         return false;
@@ -3243,13 +3247,24 @@ function checkBypass(reqUrl) {
         .split(',')
         .map(x => x.trim().toUpperCase())
         .filter(x => x)) {
-        if (upperReqHosts.some(x => x === upperNoProxyItem)) {
+        if (upperNoProxyItem === '*' ||
+            upperReqHosts.some(x => x === upperNoProxyItem ||
+                x.endsWith(`.${upperNoProxyItem}`) ||
+                (upperNoProxyItem.startsWith('.') &&
+                    x.endsWith(`${upperNoProxyItem}`)))) {
             return true;
         }
     }
     return false;
 }
 exports.checkBypass = checkBypass;
+function isLoopbackAddress(host) {
+    const hostLower = host.toLowerCase();
+    return (hostLower === 'localhost' ||
+        hostLower.startsWith('127.') ||
+        hostLower.startsWith('[::1]') ||
+        hostLower.startsWith('[0:0:0:0:0:0:0:1]'));
+}
 //# sourceMappingURL=proxy.js.map
 
 /***/ }),
@@ -3285,14 +3300,42 @@ var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
 // Max safe segment length for coercion.
 var MAX_SAFE_COMPONENT_LENGTH = 16
 
+var MAX_SAFE_BUILD_LENGTH = MAX_LENGTH - 6
+
 // The actual regexps go on exports.re
 var re = exports.re = []
+var safeRe = exports.safeRe = []
 var src = exports.src = []
 var t = exports.tokens = {}
 var R = 0
 
 function tok (n) {
   t[n] = R++
+}
+
+var LETTERDASHNUMBER = '[a-zA-Z0-9-]'
+
+// Replace some greedy regex tokens to prevent regex dos issues. These regex are
+// used internally via the safeRe object since all inputs in this library get
+// normalized first to trim and collapse all extra whitespace. The original
+// regexes are exported for userland consumption and lower level usage. A
+// future breaking change could export the safer regex only with a note that
+// all input should have extra whitespace removed.
+var safeRegexReplacements = [
+  ['\\s', 1],
+  ['\\d', MAX_LENGTH],
+  [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH],
+]
+
+function makeSafeRe (value) {
+  for (var i = 0; i < safeRegexReplacements.length; i++) {
+    var token = safeRegexReplacements[i][0]
+    var max = safeRegexReplacements[i][1]
+    value = value
+      .split(token + '*').join(token + '{0,' + max + '}')
+      .split(token + '+').join(token + '{1,' + max + '}')
+  }
+  return value
 }
 
 // The following Regular Expressions can be used for tokenizing,
@@ -3304,14 +3347,14 @@ function tok (n) {
 tok('NUMERICIDENTIFIER')
 src[t.NUMERICIDENTIFIER] = '0|[1-9]\\d*'
 tok('NUMERICIDENTIFIERLOOSE')
-src[t.NUMERICIDENTIFIERLOOSE] = '[0-9]+'
+src[t.NUMERICIDENTIFIERLOOSE] = '\\d+'
 
 // ## Non-numeric Identifier
 // Zero or more digits, followed by a letter or hyphen, and then zero or
 // more letters, digits, or hyphens.
 
 tok('NONNUMERICIDENTIFIER')
-src[t.NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-][a-zA-Z0-9-]*'
+src[t.NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-]' + LETTERDASHNUMBER + '*'
 
 // ## Main Version
 // Three dot-separated numeric identifiers.
@@ -3353,7 +3396,7 @@ src[t.PRERELEASELOOSE] = '(?:-?(' + src[t.PRERELEASEIDENTIFIERLOOSE] +
 // Any combination of digits, letters, or hyphens.
 
 tok('BUILDIDENTIFIER')
-src[t.BUILDIDENTIFIER] = '[0-9A-Za-z-]+'
+src[t.BUILDIDENTIFIER] = LETTERDASHNUMBER + '+'
 
 // ## Build Metadata
 // Plus sign, followed by one or more period-separated build metadata
@@ -3433,6 +3476,7 @@ src[t.COERCE] = '(^|[^\\d])' +
               '(?:$|[^\\d])'
 tok('COERCERTL')
 re[t.COERCERTL] = new RegExp(src[t.COERCE], 'g')
+safeRe[t.COERCERTL] = new RegExp(makeSafeRe(src[t.COERCE]), 'g')
 
 // Tilde ranges.
 // Meaning is "reasonably at or greater than"
@@ -3442,6 +3486,7 @@ src[t.LONETILDE] = '(?:~>?)'
 tok('TILDETRIM')
 src[t.TILDETRIM] = '(\\s*)' + src[t.LONETILDE] + '\\s+'
 re[t.TILDETRIM] = new RegExp(src[t.TILDETRIM], 'g')
+safeRe[t.TILDETRIM] = new RegExp(makeSafeRe(src[t.TILDETRIM]), 'g')
 var tildeTrimReplace = '$1~'
 
 tok('TILDE')
@@ -3457,6 +3502,7 @@ src[t.LONECARET] = '(?:\\^)'
 tok('CARETTRIM')
 src[t.CARETTRIM] = '(\\s*)' + src[t.LONECARET] + '\\s+'
 re[t.CARETTRIM] = new RegExp(src[t.CARETTRIM], 'g')
+safeRe[t.CARETTRIM] = new RegExp(makeSafeRe(src[t.CARETTRIM]), 'g')
 var caretTrimReplace = '$1^'
 
 tok('CARET')
@@ -3478,6 +3524,7 @@ src[t.COMPARATORTRIM] = '(\\s*)' + src[t.GTLT] +
 
 // this one has to use the /g flag
 re[t.COMPARATORTRIM] = new RegExp(src[t.COMPARATORTRIM], 'g')
+safeRe[t.COMPARATORTRIM] = new RegExp(makeSafeRe(src[t.COMPARATORTRIM]), 'g')
 var comparatorTrimReplace = '$1$2$3'
 
 // Something like `1.2.3 - 1.2.4`
@@ -3506,6 +3553,14 @@ for (var i = 0; i < R; i++) {
   debug(i, src[i])
   if (!re[i]) {
     re[i] = new RegExp(src[i])
+
+    // Replace all greedy whitespace to prevent regex dos issues. These regex are
+    // used internally via the safeRe object since all inputs in this library get
+    // normalized first to trim and collapse all extra whitespace. The original
+    // regexes are exported for userland consumption and lower level usage. A
+    // future breaking change could export the safer regex only with a note that
+    // all input should have extra whitespace removed.
+    safeRe[i] = new RegExp(makeSafeRe(src[i]))
   }
 }
 
@@ -3530,7 +3585,7 @@ function parse (version, options) {
     return null
   }
 
-  var r = options.loose ? re[t.LOOSE] : re[t.FULL]
+  var r = options.loose ? safeRe[t.LOOSE] : safeRe[t.FULL]
   if (!r.test(version)) {
     return null
   }
@@ -3585,7 +3640,7 @@ function SemVer (version, options) {
   this.options = options
   this.loose = !!options.loose
 
-  var m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])
+  var m = version.trim().match(options.loose ? safeRe[t.LOOSE] : safeRe[t.FULL])
 
   if (!m) {
     throw new TypeError('Invalid Version: ' + version)
@@ -4030,6 +4085,7 @@ function Comparator (comp, options) {
     return new Comparator(comp, options)
   }
 
+  comp = comp.trim().split(/\s+/).join(' ')
   debug('comparator', comp, options)
   this.options = options
   this.loose = !!options.loose
@@ -4046,7 +4102,7 @@ function Comparator (comp, options) {
 
 var ANY = {}
 Comparator.prototype.parse = function (comp) {
-  var r = this.options.loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+  var r = this.options.loose ? safeRe[t.COMPARATORLOOSE] : safeRe[t.COMPARATOR]
   var m = comp.match(r)
 
   if (!m) {
@@ -4170,9 +4226,16 @@ function Range (range, options) {
   this.loose = !!options.loose
   this.includePrerelease = !!options.includePrerelease
 
-  // First, split based on boolean or ||
+  // First reduce all whitespace as much as possible so we do not have to rely
+  // on potentially slow regexes like \s*. This is then stored and used for
+  // future error messages as well.
   this.raw = range
-  this.set = range.split(/\s*\|\|\s*/).map(function (range) {
+    .trim()
+    .split(/\s+/)
+    .join(' ')
+
+  // First, split based on boolean or ||
+  this.set = this.raw.split('||').map(function (range) {
     return this.parseRange(range.trim())
   }, this).filter(function (c) {
     // throw out any that are not relevant for whatever reason
@@ -4180,7 +4243,7 @@ function Range (range, options) {
   })
 
   if (!this.set.length) {
-    throw new TypeError('Invalid SemVer Range: ' + range)
+    throw new TypeError('Invalid SemVer Range: ' + this.raw)
   }
 
   this.format()
@@ -4199,20 +4262,19 @@ Range.prototype.toString = function () {
 
 Range.prototype.parseRange = function (range) {
   var loose = this.options.loose
-  range = range.trim()
   // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
-  var hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
+  var hr = loose ? safeRe[t.HYPHENRANGELOOSE] : safeRe[t.HYPHENRANGE]
   range = range.replace(hr, hyphenReplace)
   debug('hyphen replace', range)
   // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
-  range = range.replace(re[t.COMPARATORTRIM], comparatorTrimReplace)
-  debug('comparator trim', range, re[t.COMPARATORTRIM])
+  range = range.replace(safeRe[t.COMPARATORTRIM], comparatorTrimReplace)
+  debug('comparator trim', range, safeRe[t.COMPARATORTRIM])
 
   // `~ 1.2.3` => `~1.2.3`
-  range = range.replace(re[t.TILDETRIM], tildeTrimReplace)
+  range = range.replace(safeRe[t.TILDETRIM], tildeTrimReplace)
 
   // `^ 1.2.3` => `^1.2.3`
-  range = range.replace(re[t.CARETTRIM], caretTrimReplace)
+  range = range.replace(safeRe[t.CARETTRIM], caretTrimReplace)
 
   // normalize spaces
   range = range.split(/\s+/).join(' ')
@@ -4220,7 +4282,7 @@ Range.prototype.parseRange = function (range) {
   // At this point, the range is completely trimmed and
   // ready to be split into comparators.
 
-  var compRe = loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+  var compRe = loose ? safeRe[t.COMPARATORLOOSE] : safeRe[t.COMPARATOR]
   var set = range.split(' ').map(function (comp) {
     return parseComparator(comp, this.options)
   }, this).join(' ').split(/\s+/)
@@ -4320,7 +4382,7 @@ function replaceTildes (comp, options) {
 }
 
 function replaceTilde (comp, options) {
-  var r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE]
+  var r = options.loose ? safeRe[t.TILDELOOSE] : safeRe[t.TILDE]
   return comp.replace(r, function (_, M, m, p, pr) {
     debug('tilde', comp, _, M, m, p, pr)
     var ret
@@ -4361,7 +4423,7 @@ function replaceCarets (comp, options) {
 
 function replaceCaret (comp, options) {
   debug('caret', comp, options)
-  var r = options.loose ? re[t.CARETLOOSE] : re[t.CARET]
+  var r = options.loose ? safeRe[t.CARETLOOSE] : safeRe[t.CARET]
   return comp.replace(r, function (_, M, m, p, pr) {
     debug('caret', comp, _, M, m, p, pr)
     var ret
@@ -4420,7 +4482,7 @@ function replaceXRanges (comp, options) {
 
 function replaceXRange (comp, options) {
   comp = comp.trim()
-  var r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE]
+  var r = options.loose ? safeRe[t.XRANGELOOSE] : safeRe[t.XRANGE]
   return comp.replace(r, function (ret, gtlt, M, m, p, pr) {
     debug('xRange', comp, ret, gtlt, M, m, p, pr)
     var xM = isX(M)
@@ -4495,7 +4557,7 @@ function replaceXRange (comp, options) {
 function replaceStars (comp, options) {
   debug('replaceStars', comp, options)
   // Looseness is ignored here.  star is always as loose as it gets!
-  return comp.trim().replace(re[t.STAR], '')
+  return comp.trim().replace(safeRe[t.STAR], '')
 }
 
 // This function is passed to string.replace(re[t.HYPHENRANGE])
@@ -4821,7 +4883,7 @@ function coerce (version, options) {
 
   var match = null
   if (!options.rtl) {
-    match = version.match(re[t.COERCE])
+    match = version.match(safeRe[t.COERCE])
   } else {
     // Find the right-most coercible string that does not share
     // a terminus with a more left-ward coercible string.
@@ -4832,17 +4894,17 @@ function coerce (version, options) {
     // Stop when we get a match that ends at the string end, since no
     // coercible string can be more right-ward without the same terminus.
     var next
-    while ((next = re[t.COERCERTL].exec(version)) &&
+    while ((next = safeRe[t.COERCERTL].exec(version)) &&
       (!match || match.index + match[0].length !== version.length)
     ) {
       if (!match ||
           next.index + next[0].length !== match.index + match[0].length) {
         match = next
       }
-      re[t.COERCERTL].lastIndex = next.index + next[1].length + next[2].length
+      safeRe[t.COERCERTL].lastIndex = next.index + next[1].length + next[2].length
     }
     // leave it in a clean state
-    re[t.COERCERTL].lastIndex = -1
+    safeRe[t.COERCERTL].lastIndex = -1
   }
 
   if (match === null) {
@@ -6582,6 +6644,10 @@ function checkBypass(reqUrl) {
     if (!reqUrl.hostname) {
         return false;
     }
+    const reqHost = reqUrl.hostname;
+    if (isLoopbackAddress(reqHost)) {
+        return true;
+    }
     const noProxy = process.env['no_proxy'] || process.env['NO_PROXY'] || '';
     if (!noProxy) {
         return false;
@@ -6607,13 +6673,24 @@ function checkBypass(reqUrl) {
         .split(',')
         .map(x => x.trim().toUpperCase())
         .filter(x => x)) {
-        if (upperReqHosts.some(x => x === upperNoProxyItem)) {
+        if (upperNoProxyItem === '*' ||
+            upperReqHosts.some(x => x === upperNoProxyItem ||
+                x.endsWith(`.${upperNoProxyItem}`) ||
+                (upperNoProxyItem.startsWith('.') &&
+                    x.endsWith(`${upperNoProxyItem}`)))) {
             return true;
         }
     }
     return false;
 }
 exports.checkBypass = checkBypass;
+function isLoopbackAddress(host) {
+    const hostLower = host.toLowerCase();
+    return (hostLower === 'localhost' ||
+        hostLower.startsWith('127.') ||
+        hostLower.startsWith('[::1]') ||
+        hostLower.startsWith('[0:0:0:0:0:0:0:1]'));
+}
 //# sourceMappingURL=proxy.js.map
 
 /***/ }),
@@ -11091,14 +11168,42 @@ var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
 // Max safe segment length for coercion.
 var MAX_SAFE_COMPONENT_LENGTH = 16
 
+var MAX_SAFE_BUILD_LENGTH = MAX_LENGTH - 6
+
 // The actual regexps go on exports.re
 var re = exports.re = []
+var safeRe = exports.safeRe = []
 var src = exports.src = []
 var t = exports.tokens = {}
 var R = 0
 
 function tok (n) {
   t[n] = R++
+}
+
+var LETTERDASHNUMBER = '[a-zA-Z0-9-]'
+
+// Replace some greedy regex tokens to prevent regex dos issues. These regex are
+// used internally via the safeRe object since all inputs in this library get
+// normalized first to trim and collapse all extra whitespace. The original
+// regexes are exported for userland consumption and lower level usage. A
+// future breaking change could export the safer regex only with a note that
+// all input should have extra whitespace removed.
+var safeRegexReplacements = [
+  ['\\s', 1],
+  ['\\d', MAX_LENGTH],
+  [LETTERDASHNUMBER, MAX_SAFE_BUILD_LENGTH],
+]
+
+function makeSafeRe (value) {
+  for (var i = 0; i < safeRegexReplacements.length; i++) {
+    var token = safeRegexReplacements[i][0]
+    var max = safeRegexReplacements[i][1]
+    value = value
+      .split(token + '*').join(token + '{0,' + max + '}')
+      .split(token + '+').join(token + '{1,' + max + '}')
+  }
+  return value
 }
 
 // The following Regular Expressions can be used for tokenizing,
@@ -11110,14 +11215,14 @@ function tok (n) {
 tok('NUMERICIDENTIFIER')
 src[t.NUMERICIDENTIFIER] = '0|[1-9]\\d*'
 tok('NUMERICIDENTIFIERLOOSE')
-src[t.NUMERICIDENTIFIERLOOSE] = '[0-9]+'
+src[t.NUMERICIDENTIFIERLOOSE] = '\\d+'
 
 // ## Non-numeric Identifier
 // Zero or more digits, followed by a letter or hyphen, and then zero or
 // more letters, digits, or hyphens.
 
 tok('NONNUMERICIDENTIFIER')
-src[t.NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-][a-zA-Z0-9-]*'
+src[t.NONNUMERICIDENTIFIER] = '\\d*[a-zA-Z-]' + LETTERDASHNUMBER + '*'
 
 // ## Main Version
 // Three dot-separated numeric identifiers.
@@ -11159,7 +11264,7 @@ src[t.PRERELEASELOOSE] = '(?:-?(' + src[t.PRERELEASEIDENTIFIERLOOSE] +
 // Any combination of digits, letters, or hyphens.
 
 tok('BUILDIDENTIFIER')
-src[t.BUILDIDENTIFIER] = '[0-9A-Za-z-]+'
+src[t.BUILDIDENTIFIER] = LETTERDASHNUMBER + '+'
 
 // ## Build Metadata
 // Plus sign, followed by one or more period-separated build metadata
@@ -11239,6 +11344,7 @@ src[t.COERCE] = '(^|[^\\d])' +
               '(?:$|[^\\d])'
 tok('COERCERTL')
 re[t.COERCERTL] = new RegExp(src[t.COERCE], 'g')
+safeRe[t.COERCERTL] = new RegExp(makeSafeRe(src[t.COERCE]), 'g')
 
 // Tilde ranges.
 // Meaning is "reasonably at or greater than"
@@ -11248,6 +11354,7 @@ src[t.LONETILDE] = '(?:~>?)'
 tok('TILDETRIM')
 src[t.TILDETRIM] = '(\\s*)' + src[t.LONETILDE] + '\\s+'
 re[t.TILDETRIM] = new RegExp(src[t.TILDETRIM], 'g')
+safeRe[t.TILDETRIM] = new RegExp(makeSafeRe(src[t.TILDETRIM]), 'g')
 var tildeTrimReplace = '$1~'
 
 tok('TILDE')
@@ -11263,6 +11370,7 @@ src[t.LONECARET] = '(?:\\^)'
 tok('CARETTRIM')
 src[t.CARETTRIM] = '(\\s*)' + src[t.LONECARET] + '\\s+'
 re[t.CARETTRIM] = new RegExp(src[t.CARETTRIM], 'g')
+safeRe[t.CARETTRIM] = new RegExp(makeSafeRe(src[t.CARETTRIM]), 'g')
 var caretTrimReplace = '$1^'
 
 tok('CARET')
@@ -11284,6 +11392,7 @@ src[t.COMPARATORTRIM] = '(\\s*)' + src[t.GTLT] +
 
 // this one has to use the /g flag
 re[t.COMPARATORTRIM] = new RegExp(src[t.COMPARATORTRIM], 'g')
+safeRe[t.COMPARATORTRIM] = new RegExp(makeSafeRe(src[t.COMPARATORTRIM]), 'g')
 var comparatorTrimReplace = '$1$2$3'
 
 // Something like `1.2.3 - 1.2.4`
@@ -11312,6 +11421,14 @@ for (var i = 0; i < R; i++) {
   debug(i, src[i])
   if (!re[i]) {
     re[i] = new RegExp(src[i])
+
+    // Replace all greedy whitespace to prevent regex dos issues. These regex are
+    // used internally via the safeRe object since all inputs in this library get
+    // normalized first to trim and collapse all extra whitespace. The original
+    // regexes are exported for userland consumption and lower level usage. A
+    // future breaking change could export the safer regex only with a note that
+    // all input should have extra whitespace removed.
+    safeRe[i] = new RegExp(makeSafeRe(src[i]))
   }
 }
 
@@ -11336,7 +11453,7 @@ function parse (version, options) {
     return null
   }
 
-  var r = options.loose ? re[t.LOOSE] : re[t.FULL]
+  var r = options.loose ? safeRe[t.LOOSE] : safeRe[t.FULL]
   if (!r.test(version)) {
     return null
   }
@@ -11391,7 +11508,7 @@ function SemVer (version, options) {
   this.options = options
   this.loose = !!options.loose
 
-  var m = version.trim().match(options.loose ? re[t.LOOSE] : re[t.FULL])
+  var m = version.trim().match(options.loose ? safeRe[t.LOOSE] : safeRe[t.FULL])
 
   if (!m) {
     throw new TypeError('Invalid Version: ' + version)
@@ -11836,6 +11953,7 @@ function Comparator (comp, options) {
     return new Comparator(comp, options)
   }
 
+  comp = comp.trim().split(/\s+/).join(' ')
   debug('comparator', comp, options)
   this.options = options
   this.loose = !!options.loose
@@ -11852,7 +11970,7 @@ function Comparator (comp, options) {
 
 var ANY = {}
 Comparator.prototype.parse = function (comp) {
-  var r = this.options.loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+  var r = this.options.loose ? safeRe[t.COMPARATORLOOSE] : safeRe[t.COMPARATOR]
   var m = comp.match(r)
 
   if (!m) {
@@ -11976,9 +12094,16 @@ function Range (range, options) {
   this.loose = !!options.loose
   this.includePrerelease = !!options.includePrerelease
 
-  // First, split based on boolean or ||
+  // First reduce all whitespace as much as possible so we do not have to rely
+  // on potentially slow regexes like \s*. This is then stored and used for
+  // future error messages as well.
   this.raw = range
-  this.set = range.split(/\s*\|\|\s*/).map(function (range) {
+    .trim()
+    .split(/\s+/)
+    .join(' ')
+
+  // First, split based on boolean or ||
+  this.set = this.raw.split('||').map(function (range) {
     return this.parseRange(range.trim())
   }, this).filter(function (c) {
     // throw out any that are not relevant for whatever reason
@@ -11986,7 +12111,7 @@ function Range (range, options) {
   })
 
   if (!this.set.length) {
-    throw new TypeError('Invalid SemVer Range: ' + range)
+    throw new TypeError('Invalid SemVer Range: ' + this.raw)
   }
 
   this.format()
@@ -12005,20 +12130,19 @@ Range.prototype.toString = function () {
 
 Range.prototype.parseRange = function (range) {
   var loose = this.options.loose
-  range = range.trim()
   // `1.2.3 - 1.2.4` => `>=1.2.3 <=1.2.4`
-  var hr = loose ? re[t.HYPHENRANGELOOSE] : re[t.HYPHENRANGE]
+  var hr = loose ? safeRe[t.HYPHENRANGELOOSE] : safeRe[t.HYPHENRANGE]
   range = range.replace(hr, hyphenReplace)
   debug('hyphen replace', range)
   // `> 1.2.3 < 1.2.5` => `>1.2.3 <1.2.5`
-  range = range.replace(re[t.COMPARATORTRIM], comparatorTrimReplace)
-  debug('comparator trim', range, re[t.COMPARATORTRIM])
+  range = range.replace(safeRe[t.COMPARATORTRIM], comparatorTrimReplace)
+  debug('comparator trim', range, safeRe[t.COMPARATORTRIM])
 
   // `~ 1.2.3` => `~1.2.3`
-  range = range.replace(re[t.TILDETRIM], tildeTrimReplace)
+  range = range.replace(safeRe[t.TILDETRIM], tildeTrimReplace)
 
   // `^ 1.2.3` => `^1.2.3`
-  range = range.replace(re[t.CARETTRIM], caretTrimReplace)
+  range = range.replace(safeRe[t.CARETTRIM], caretTrimReplace)
 
   // normalize spaces
   range = range.split(/\s+/).join(' ')
@@ -12026,7 +12150,7 @@ Range.prototype.parseRange = function (range) {
   // At this point, the range is completely trimmed and
   // ready to be split into comparators.
 
-  var compRe = loose ? re[t.COMPARATORLOOSE] : re[t.COMPARATOR]
+  var compRe = loose ? safeRe[t.COMPARATORLOOSE] : safeRe[t.COMPARATOR]
   var set = range.split(' ').map(function (comp) {
     return parseComparator(comp, this.options)
   }, this).join(' ').split(/\s+/)
@@ -12126,7 +12250,7 @@ function replaceTildes (comp, options) {
 }
 
 function replaceTilde (comp, options) {
-  var r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE]
+  var r = options.loose ? safeRe[t.TILDELOOSE] : safeRe[t.TILDE]
   return comp.replace(r, function (_, M, m, p, pr) {
     debug('tilde', comp, _, M, m, p, pr)
     var ret
@@ -12167,7 +12291,7 @@ function replaceCarets (comp, options) {
 
 function replaceCaret (comp, options) {
   debug('caret', comp, options)
-  var r = options.loose ? re[t.CARETLOOSE] : re[t.CARET]
+  var r = options.loose ? safeRe[t.CARETLOOSE] : safeRe[t.CARET]
   return comp.replace(r, function (_, M, m, p, pr) {
     debug('caret', comp, _, M, m, p, pr)
     var ret
@@ -12226,7 +12350,7 @@ function replaceXRanges (comp, options) {
 
 function replaceXRange (comp, options) {
   comp = comp.trim()
-  var r = options.loose ? re[t.XRANGELOOSE] : re[t.XRANGE]
+  var r = options.loose ? safeRe[t.XRANGELOOSE] : safeRe[t.XRANGE]
   return comp.replace(r, function (ret, gtlt, M, m, p, pr) {
     debug('xRange', comp, ret, gtlt, M, m, p, pr)
     var xM = isX(M)
@@ -12301,7 +12425,7 @@ function replaceXRange (comp, options) {
 function replaceStars (comp, options) {
   debug('replaceStars', comp, options)
   // Looseness is ignored here.  star is always as loose as it gets!
-  return comp.trim().replace(re[t.STAR], '')
+  return comp.trim().replace(safeRe[t.STAR], '')
 }
 
 // This function is passed to string.replace(re[t.HYPHENRANGE])
@@ -12627,7 +12751,7 @@ function coerce (version, options) {
 
   var match = null
   if (!options.rtl) {
-    match = version.match(re[t.COERCE])
+    match = version.match(safeRe[t.COERCE])
   } else {
     // Find the right-most coercible string that does not share
     // a terminus with a more left-ward coercible string.
@@ -12638,17 +12762,17 @@ function coerce (version, options) {
     // Stop when we get a match that ends at the string end, since no
     // coercible string can be more right-ward without the same terminus.
     var next
-    while ((next = re[t.COERCERTL].exec(version)) &&
+    while ((next = safeRe[t.COERCERTL].exec(version)) &&
       (!match || match.index + match[0].length !== version.length)
     ) {
       if (!match ||
           next.index + next[0].length !== match.index + match[0].length) {
         match = next
       }
-      re[t.COERCERTL].lastIndex = next.index + next[1].length + next[2].length
+      safeRe[t.COERCERTL].lastIndex = next.index + next[1].length + next[2].length
     }
     // leave it in a clean state
-    re[t.COERCERTL].lastIndex = -1
+    safeRe[t.COERCERTL].lastIndex = -1
   }
 
   if (match === null) {
@@ -47496,6 +47620,2174 @@ var __createBinding;
 
 /***/ }),
 
+/***/ 1374:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+const f = __nccwpck_require__(2033)
+const DateTime = global.Date
+
+class Date extends DateTime {
+  constructor (value) {
+    super(value)
+    this.isDate = true
+  }
+  toISOString () {
+    return `${this.getUTCFullYear()}-${f(2, this.getUTCMonth() + 1)}-${f(2, this.getUTCDate())}`
+  }
+}
+
+module.exports = value => {
+  const date = new Date(value)
+  /* istanbul ignore if */
+  if (isNaN(date)) {
+    throw new TypeError('Invalid Datetime')
+  } else {
+    return date
+  }
+}
+
+
+/***/ }),
+
+/***/ 5606:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+const f = __nccwpck_require__(2033)
+
+class FloatingDateTime extends Date {
+  constructor (value) {
+    super(value + 'Z')
+    this.isFloating = true
+  }
+  toISOString () {
+    const date = `${this.getUTCFullYear()}-${f(2, this.getUTCMonth() + 1)}-${f(2, this.getUTCDate())}`
+    const time = `${f(2, this.getUTCHours())}:${f(2, this.getUTCMinutes())}:${f(2, this.getUTCSeconds())}.${f(3, this.getUTCMilliseconds())}`
+    return `${date}T${time}`
+  }
+}
+
+module.exports = value => {
+  const date = new FloatingDateTime(value)
+  /* istanbul ignore if */
+  if (isNaN(date)) {
+    throw new TypeError('Invalid Datetime')
+  } else {
+    return date
+  }
+}
+
+
+/***/ }),
+
+/***/ 3173:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = value => {
+  const date = new Date(value)
+  /* istanbul ignore if */
+  if (isNaN(date)) {
+    throw new TypeError('Invalid Datetime')
+  } else {
+    return date
+  }
+}
+
+
+/***/ }),
+
+/***/ 5484:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+const f = __nccwpck_require__(2033)
+
+class Time extends Date {
+  constructor (value) {
+    super(`0000-01-01T${value}Z`)
+    this.isTime = true
+  }
+  toISOString () {
+    return `${f(2, this.getUTCHours())}:${f(2, this.getUTCMinutes())}:${f(2, this.getUTCSeconds())}.${f(3, this.getUTCMilliseconds())}`
+  }
+}
+
+module.exports = value => {
+  const date = new Time(value)
+  /* istanbul ignore if */
+  if (isNaN(date)) {
+    throw new TypeError('Invalid Datetime')
+  } else {
+    return date
+  }
+}
+
+
+/***/ }),
+
+/***/ 2033:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = (d, num) => {
+  num = String(num)
+  while (num.length < d) num = '0' + num
+  return num
+}
+
+
+/***/ }),
+
+/***/ 9137:
+/***/ ((module) => {
+
+"use strict";
+
+const ParserEND = 0x110000
+class ParserError extends Error {
+  /* istanbul ignore next */
+  constructor (msg, filename, linenumber) {
+    super('[ParserError] ' + msg, filename, linenumber)
+    this.name = 'ParserError'
+    this.code = 'ParserError'
+    if (Error.captureStackTrace) Error.captureStackTrace(this, ParserError)
+  }
+}
+class State {
+  constructor (parser) {
+    this.parser = parser
+    this.buf = ''
+    this.returned = null
+    this.result = null
+    this.resultTable = null
+    this.resultArr = null
+  }
+}
+class Parser {
+  constructor () {
+    this.pos = 0
+    this.col = 0
+    this.line = 0
+    this.obj = {}
+    this.ctx = this.obj
+    this.stack = []
+    this._buf = ''
+    this.char = null
+    this.ii = 0
+    this.state = new State(this.parseStart)
+  }
+
+  parse (str) {
+    /* istanbul ignore next */
+    if (str.length === 0 || str.length == null) return
+
+    this._buf = String(str)
+    this.ii = -1
+    this.char = -1
+    let getNext
+    while (getNext === false || this.nextChar()) {
+      getNext = this.runOne()
+    }
+    this._buf = null
+  }
+  nextChar () {
+    if (this.char === 0x0A) {
+      ++this.line
+      this.col = -1
+    }
+    ++this.ii
+    this.char = this._buf.codePointAt(this.ii)
+    ++this.pos
+    ++this.col
+    return this.haveBuffer()
+  }
+  haveBuffer () {
+    return this.ii < this._buf.length
+  }
+  runOne () {
+    return this.state.parser.call(this, this.state.returned)
+  }
+  finish () {
+    this.char = ParserEND
+    let last
+    do {
+      last = this.state.parser
+      this.runOne()
+    } while (this.state.parser !== last)
+
+    this.ctx = null
+    this.state = null
+    this._buf = null
+
+    return this.obj
+  }
+  next (fn) {
+    /* istanbul ignore next */
+    if (typeof fn !== 'function') throw new ParserError('Tried to set state to non-existent state: ' + JSON.stringify(fn))
+    this.state.parser = fn
+  }
+  goto (fn) {
+    this.next(fn)
+    return this.runOne()
+  }
+  call (fn, returnWith) {
+    if (returnWith) this.next(returnWith)
+    this.stack.push(this.state)
+    this.state = new State(fn)
+  }
+  callNow (fn, returnWith) {
+    this.call(fn, returnWith)
+    return this.runOne()
+  }
+  return (value) {
+    /* istanbul ignore next */
+    if (this.stack.length === 0) throw this.error(new ParserError('Stack underflow'))
+    if (value === undefined) value = this.state.buf
+    this.state = this.stack.pop()
+    this.state.returned = value
+  }
+  returnNow (value) {
+    this.return(value)
+    return this.runOne()
+  }
+  consume () {
+    /* istanbul ignore next */
+    if (this.char === ParserEND) throw this.error(new ParserError('Unexpected end-of-buffer'))
+    this.state.buf += this._buf[this.ii]
+  }
+  error (err) {
+    err.line = this.line
+    err.col = this.col
+    err.pos = this.pos
+    return err
+  }
+  /* istanbul ignore next */
+  parseStart () {
+    throw new ParserError('Must declare a parseStart method')
+  }
+}
+Parser.END = ParserEND
+Parser.Error = ParserError
+module.exports = Parser
+
+
+/***/ }),
+
+/***/ 8784:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+/* eslint-disable no-new-wrappers, no-eval, camelcase, operator-linebreak */
+module.exports = makeParserClass(__nccwpck_require__(9137))
+module.exports.makeParserClass = makeParserClass
+
+class TomlError extends Error {
+  constructor (msg) {
+    super(msg)
+    this.name = 'TomlError'
+    /* istanbul ignore next */
+    if (Error.captureStackTrace) Error.captureStackTrace(this, TomlError)
+    this.fromTOML = true
+    this.wrapped = null
+  }
+}
+TomlError.wrap = err => {
+  const terr = new TomlError(err.message)
+  terr.code = err.code
+  terr.wrapped = err
+  return terr
+}
+module.exports.TomlError = TomlError
+
+const createDateTime = __nccwpck_require__(3173)
+const createDateTimeFloat = __nccwpck_require__(5606)
+const createDate = __nccwpck_require__(1374)
+const createTime = __nccwpck_require__(5484)
+
+const CTRL_I = 0x09
+const CTRL_J = 0x0A
+const CTRL_M = 0x0D
+const CTRL_CHAR_BOUNDARY = 0x1F // the last non-character in the latin1 region of unicode, except DEL
+const CHAR_SP = 0x20
+const CHAR_QUOT = 0x22
+const CHAR_NUM = 0x23
+const CHAR_APOS = 0x27
+const CHAR_PLUS = 0x2B
+const CHAR_COMMA = 0x2C
+const CHAR_HYPHEN = 0x2D
+const CHAR_PERIOD = 0x2E
+const CHAR_0 = 0x30
+const CHAR_1 = 0x31
+const CHAR_7 = 0x37
+const CHAR_9 = 0x39
+const CHAR_COLON = 0x3A
+const CHAR_EQUALS = 0x3D
+const CHAR_A = 0x41
+const CHAR_E = 0x45
+const CHAR_F = 0x46
+const CHAR_T = 0x54
+const CHAR_U = 0x55
+const CHAR_Z = 0x5A
+const CHAR_LOWBAR = 0x5F
+const CHAR_a = 0x61
+const CHAR_b = 0x62
+const CHAR_e = 0x65
+const CHAR_f = 0x66
+const CHAR_i = 0x69
+const CHAR_l = 0x6C
+const CHAR_n = 0x6E
+const CHAR_o = 0x6F
+const CHAR_r = 0x72
+const CHAR_s = 0x73
+const CHAR_t = 0x74
+const CHAR_u = 0x75
+const CHAR_x = 0x78
+const CHAR_z = 0x7A
+const CHAR_LCUB = 0x7B
+const CHAR_RCUB = 0x7D
+const CHAR_LSQB = 0x5B
+const CHAR_BSOL = 0x5C
+const CHAR_RSQB = 0x5D
+const CHAR_DEL = 0x7F
+const SURROGATE_FIRST = 0xD800
+const SURROGATE_LAST = 0xDFFF
+
+const escapes = {
+  [CHAR_b]: '\u0008',
+  [CHAR_t]: '\u0009',
+  [CHAR_n]: '\u000A',
+  [CHAR_f]: '\u000C',
+  [CHAR_r]: '\u000D',
+  [CHAR_QUOT]: '\u0022',
+  [CHAR_BSOL]: '\u005C'
+}
+
+function isDigit (cp) {
+  return cp >= CHAR_0 && cp <= CHAR_9
+}
+function isHexit (cp) {
+  return (cp >= CHAR_A && cp <= CHAR_F) || (cp >= CHAR_a && cp <= CHAR_f) || (cp >= CHAR_0 && cp <= CHAR_9)
+}
+function isBit (cp) {
+  return cp === CHAR_1 || cp === CHAR_0
+}
+function isOctit (cp) {
+  return (cp >= CHAR_0 && cp <= CHAR_7)
+}
+function isAlphaNumQuoteHyphen (cp) {
+  return (cp >= CHAR_A && cp <= CHAR_Z)
+      || (cp >= CHAR_a && cp <= CHAR_z)
+      || (cp >= CHAR_0 && cp <= CHAR_9)
+      || cp === CHAR_APOS
+      || cp === CHAR_QUOT
+      || cp === CHAR_LOWBAR
+      || cp === CHAR_HYPHEN
+}
+function isAlphaNumHyphen (cp) {
+  return (cp >= CHAR_A && cp <= CHAR_Z)
+      || (cp >= CHAR_a && cp <= CHAR_z)
+      || (cp >= CHAR_0 && cp <= CHAR_9)
+      || cp === CHAR_LOWBAR
+      || cp === CHAR_HYPHEN
+}
+const _type = Symbol('type')
+const _declared = Symbol('declared')
+
+const hasOwnProperty = Object.prototype.hasOwnProperty
+const defineProperty = Object.defineProperty
+const descriptor = {configurable: true, enumerable: true, writable: true, value: undefined}
+
+function hasKey (obj, key) {
+  if (hasOwnProperty.call(obj, key)) return true
+  if (key === '__proto__') defineProperty(obj, '__proto__', descriptor)
+  return false
+}
+
+const INLINE_TABLE = Symbol('inline-table')
+function InlineTable () {
+  return Object.defineProperties({}, {
+    [_type]: {value: INLINE_TABLE}
+  })
+}
+function isInlineTable (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === INLINE_TABLE
+}
+
+const TABLE = Symbol('table')
+function Table () {
+  return Object.defineProperties({}, {
+    [_type]: {value: TABLE},
+    [_declared]: {value: false, writable: true}
+  })
+}
+function isTable (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === TABLE
+}
+
+const _contentType = Symbol('content-type')
+const INLINE_LIST = Symbol('inline-list')
+function InlineList (type) {
+  return Object.defineProperties([], {
+    [_type]: {value: INLINE_LIST},
+    [_contentType]: {value: type}
+  })
+}
+function isInlineList (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === INLINE_LIST
+}
+
+const LIST = Symbol('list')
+function List () {
+  return Object.defineProperties([], {
+    [_type]: {value: LIST}
+  })
+}
+function isList (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === LIST
+}
+
+// in an eval, to let bundlers not slurp in a util proxy
+let _custom
+try {
+  const utilInspect = eval("require('util').inspect")
+  _custom = utilInspect.custom
+} catch (_) {
+  /* eval require not available in transpiled bundle */
+}
+/* istanbul ignore next */
+const _inspect = _custom || 'inspect'
+
+class BoxedBigInt {
+  constructor (value) {
+    try {
+      this.value = global.BigInt.asIntN(64, value)
+    } catch (_) {
+      /* istanbul ignore next */
+      this.value = null
+    }
+    Object.defineProperty(this, _type, {value: INTEGER})
+  }
+  isNaN () {
+    return this.value === null
+  }
+  /* istanbul ignore next */
+  toString () {
+    return String(this.value)
+  }
+  /* istanbul ignore next */
+  [_inspect] () {
+    return `[BigInt: ${this.toString()}]}`
+  }
+  valueOf () {
+    return this.value
+  }
+}
+
+const INTEGER = Symbol('integer')
+function Integer (value) {
+  let num = Number(value)
+  // -0 is a float thing, not an int thing
+  if (Object.is(num, -0)) num = 0
+  /* istanbul ignore else */
+  if (global.BigInt && !Number.isSafeInteger(num)) {
+    return new BoxedBigInt(value)
+  } else {
+    /* istanbul ignore next */
+    return Object.defineProperties(new Number(num), {
+      isNaN: {value: function () { return isNaN(this) }},
+      [_type]: {value: INTEGER},
+      [_inspect]: {value: () => `[Integer: ${value}]`}
+    })
+  }
+}
+function isInteger (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === INTEGER
+}
+
+const FLOAT = Symbol('float')
+function Float (value) {
+  /* istanbul ignore next */
+  return Object.defineProperties(new Number(value), {
+    [_type]: {value: FLOAT},
+    [_inspect]: {value: () => `[Float: ${value}]`}
+  })
+}
+function isFloat (obj) {
+  if (obj === null || typeof (obj) !== 'object') return false
+  return obj[_type] === FLOAT
+}
+
+function tomlType (value) {
+  const type = typeof value
+  if (type === 'object') {
+    /* istanbul ignore if */
+    if (value === null) return 'null'
+    if (value instanceof Date) return 'datetime'
+    /* istanbul ignore else */
+    if (_type in value) {
+      switch (value[_type]) {
+        case INLINE_TABLE: return 'inline-table'
+        case INLINE_LIST: return 'inline-list'
+        /* istanbul ignore next */
+        case TABLE: return 'table'
+        /* istanbul ignore next */
+        case LIST: return 'list'
+        case FLOAT: return 'float'
+        case INTEGER: return 'integer'
+      }
+    }
+  }
+  return type
+}
+
+function makeParserClass (Parser) {
+  class TOMLParser extends Parser {
+    constructor () {
+      super()
+      this.ctx = this.obj = Table()
+    }
+
+    /* MATCH HELPER */
+    atEndOfWord () {
+      return this.char === CHAR_NUM || this.char === CTRL_I || this.char === CHAR_SP || this.atEndOfLine()
+    }
+    atEndOfLine () {
+      return this.char === Parser.END || this.char === CTRL_J || this.char === CTRL_M
+    }
+
+    parseStart () {
+      if (this.char === Parser.END) {
+        return null
+      } else if (this.char === CHAR_LSQB) {
+        return this.call(this.parseTableOrList)
+      } else if (this.char === CHAR_NUM) {
+        return this.call(this.parseComment)
+      } else if (this.char === CTRL_J || this.char === CHAR_SP || this.char === CTRL_I || this.char === CTRL_M) {
+        return null
+      } else if (isAlphaNumQuoteHyphen(this.char)) {
+        return this.callNow(this.parseAssignStatement)
+      } else {
+        throw this.error(new TomlError(`Unknown character "${this.char}"`))
+      }
+    }
+
+    // HELPER, this strips any whitespace and comments to the end of the line
+    // then RETURNS. Last state in a production.
+    parseWhitespaceToEOL () {
+      if (this.char === CHAR_SP || this.char === CTRL_I || this.char === CTRL_M) {
+        return null
+      } else if (this.char === CHAR_NUM) {
+        return this.goto(this.parseComment)
+      } else if (this.char === Parser.END || this.char === CTRL_J) {
+        return this.return()
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected only whitespace or comments till end of line'))
+      }
+    }
+
+    /* ASSIGNMENT: key = value */
+    parseAssignStatement () {
+      return this.callNow(this.parseAssign, this.recordAssignStatement)
+    }
+    recordAssignStatement (kv) {
+      let target = this.ctx
+      let finalKey = kv.key.pop()
+      for (let kw of kv.key) {
+        if (hasKey(target, kw) && (!isTable(target[kw]) || target[kw][_declared])) {
+          throw this.error(new TomlError("Can't redefine existing key"))
+        }
+        target = target[kw] = target[kw] || Table()
+      }
+      if (hasKey(target, finalKey)) {
+        throw this.error(new TomlError("Can't redefine existing key"))
+      }
+      // unbox our numbers
+      if (isInteger(kv.value) || isFloat(kv.value)) {
+        target[finalKey] = kv.value.valueOf()
+      } else {
+        target[finalKey] = kv.value
+      }
+      return this.goto(this.parseWhitespaceToEOL)
+    }
+
+    /* ASSSIGNMENT expression, key = value possibly inside an inline table */
+    parseAssign () {
+      return this.callNow(this.parseKeyword, this.recordAssignKeyword)
+    }
+    recordAssignKeyword (key) {
+      if (this.state.resultTable) {
+        this.state.resultTable.push(key)
+      } else {
+        this.state.resultTable = [key]
+      }
+      return this.goto(this.parseAssignKeywordPreDot)
+    }
+    parseAssignKeywordPreDot () {
+      if (this.char === CHAR_PERIOD) {
+        return this.next(this.parseAssignKeywordPostDot)
+      } else if (this.char !== CHAR_SP && this.char !== CTRL_I) {
+        return this.goto(this.parseAssignEqual)
+      }
+    }
+    parseAssignKeywordPostDot () {
+      if (this.char !== CHAR_SP && this.char !== CTRL_I) {
+        return this.callNow(this.parseKeyword, this.recordAssignKeyword)
+      }
+    }
+
+    parseAssignEqual () {
+      if (this.char === CHAR_EQUALS) {
+        return this.next(this.parseAssignPreValue)
+      } else {
+        throw this.error(new TomlError('Invalid character, expected "="'))
+      }
+    }
+    parseAssignPreValue () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else {
+        return this.callNow(this.parseValue, this.recordAssignValue)
+      }
+    }
+    recordAssignValue (value) {
+      return this.returnNow({key: this.state.resultTable, value: value})
+    }
+
+    /* COMMENTS: #...eol */
+    parseComment () {
+      do {
+        if (this.char === Parser.END || this.char === CTRL_J) {
+          return this.return()
+        }
+      } while (this.nextChar())
+    }
+
+    /* TABLES AND LISTS, [foo] and [[foo]] */
+    parseTableOrList () {
+      if (this.char === CHAR_LSQB) {
+        this.next(this.parseList)
+      } else {
+        return this.goto(this.parseTable)
+      }
+    }
+
+    /* TABLE [foo.bar.baz] */
+    parseTable () {
+      this.ctx = this.obj
+      return this.goto(this.parseTableNext)
+    }
+    parseTableNext () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else {
+        return this.callNow(this.parseKeyword, this.parseTableMore)
+      }
+    }
+    parseTableMore (keyword) {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else if (this.char === CHAR_RSQB) {
+        if (hasKey(this.ctx, keyword) && (!isTable(this.ctx[keyword]) || this.ctx[keyword][_declared])) {
+          throw this.error(new TomlError("Can't redefine existing key"))
+        } else {
+          this.ctx = this.ctx[keyword] = this.ctx[keyword] || Table()
+          this.ctx[_declared] = true
+        }
+        return this.next(this.parseWhitespaceToEOL)
+      } else if (this.char === CHAR_PERIOD) {
+        if (!hasKey(this.ctx, keyword)) {
+          this.ctx = this.ctx[keyword] = Table()
+        } else if (isTable(this.ctx[keyword])) {
+          this.ctx = this.ctx[keyword]
+        } else if (isList(this.ctx[keyword])) {
+          this.ctx = this.ctx[keyword][this.ctx[keyword].length - 1]
+        } else {
+          throw this.error(new TomlError("Can't redefine existing key"))
+        }
+        return this.next(this.parseTableNext)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected whitespace, . or ]'))
+      }
+    }
+
+    /* LIST [[a.b.c]] */
+    parseList () {
+      this.ctx = this.obj
+      return this.goto(this.parseListNext)
+    }
+    parseListNext () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else {
+        return this.callNow(this.parseKeyword, this.parseListMore)
+      }
+    }
+    parseListMore (keyword) {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else if (this.char === CHAR_RSQB) {
+        if (!hasKey(this.ctx, keyword)) {
+          this.ctx[keyword] = List()
+        }
+        if (isInlineList(this.ctx[keyword])) {
+          throw this.error(new TomlError("Can't extend an inline array"))
+        } else if (isList(this.ctx[keyword])) {
+          const next = Table()
+          this.ctx[keyword].push(next)
+          this.ctx = next
+        } else {
+          throw this.error(new TomlError("Can't redefine an existing key"))
+        }
+        return this.next(this.parseListEnd)
+      } else if (this.char === CHAR_PERIOD) {
+        if (!hasKey(this.ctx, keyword)) {
+          this.ctx = this.ctx[keyword] = Table()
+        } else if (isInlineList(this.ctx[keyword])) {
+          throw this.error(new TomlError("Can't extend an inline array"))
+        } else if (isInlineTable(this.ctx[keyword])) {
+          throw this.error(new TomlError("Can't extend an inline table"))
+        } else if (isList(this.ctx[keyword])) {
+          this.ctx = this.ctx[keyword][this.ctx[keyword].length - 1]
+        } else if (isTable(this.ctx[keyword])) {
+          this.ctx = this.ctx[keyword]
+        } else {
+          throw this.error(new TomlError("Can't redefine an existing key"))
+        }
+        return this.next(this.parseListNext)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected whitespace, . or ]'))
+      }
+    }
+    parseListEnd (keyword) {
+      if (this.char === CHAR_RSQB) {
+        return this.next(this.parseWhitespaceToEOL)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected whitespace, . or ]'))
+      }
+    }
+
+    /* VALUE string, number, boolean, inline list, inline object */
+    parseValue () {
+      if (this.char === Parser.END) {
+        throw this.error(new TomlError('Key without value'))
+      } else if (this.char === CHAR_QUOT) {
+        return this.next(this.parseDoubleString)
+      } if (this.char === CHAR_APOS) {
+        return this.next(this.parseSingleString)
+      } else if (this.char === CHAR_HYPHEN || this.char === CHAR_PLUS) {
+        return this.goto(this.parseNumberSign)
+      } else if (this.char === CHAR_i) {
+        return this.next(this.parseInf)
+      } else if (this.char === CHAR_n) {
+        return this.next(this.parseNan)
+      } else if (isDigit(this.char)) {
+        return this.goto(this.parseNumberOrDateTime)
+      } else if (this.char === CHAR_t || this.char === CHAR_f) {
+        return this.goto(this.parseBoolean)
+      } else if (this.char === CHAR_LSQB) {
+        return this.call(this.parseInlineList, this.recordValue)
+      } else if (this.char === CHAR_LCUB) {
+        return this.call(this.parseInlineTable, this.recordValue)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expecting string, number, datetime, boolean, inline array or inline table'))
+      }
+    }
+    recordValue (value) {
+      return this.returnNow(value)
+    }
+
+    parseInf () {
+      if (this.char === CHAR_n) {
+        return this.next(this.parseInf2)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected "inf", "+inf" or "-inf"'))
+      }
+    }
+    parseInf2 () {
+      if (this.char === CHAR_f) {
+        if (this.state.buf === '-') {
+          return this.return(-Infinity)
+        } else {
+          return this.return(Infinity)
+        }
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected "inf", "+inf" or "-inf"'))
+      }
+    }
+
+    parseNan () {
+      if (this.char === CHAR_a) {
+        return this.next(this.parseNan2)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected "nan"'))
+      }
+    }
+    parseNan2 () {
+      if (this.char === CHAR_n) {
+        return this.return(NaN)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected "nan"'))
+      }
+    }
+
+    /* KEYS, barewords or basic, literal, or dotted */
+    parseKeyword () {
+      if (this.char === CHAR_QUOT) {
+        return this.next(this.parseBasicString)
+      } else if (this.char === CHAR_APOS) {
+        return this.next(this.parseLiteralString)
+      } else {
+        return this.goto(this.parseBareKey)
+      }
+    }
+
+    /* KEYS: barewords */
+    parseBareKey () {
+      do {
+        if (this.char === Parser.END) {
+          throw this.error(new TomlError('Key ended without value'))
+        } else if (isAlphaNumHyphen(this.char)) {
+          this.consume()
+        } else if (this.state.buf.length === 0) {
+          throw this.error(new TomlError('Empty bare keys are not allowed'))
+        } else {
+          return this.returnNow()
+        }
+      } while (this.nextChar())
+    }
+
+    /* STRINGS, single quoted (literal) */
+    parseSingleString () {
+      if (this.char === CHAR_APOS) {
+        return this.next(this.parseLiteralMultiStringMaybe)
+      } else {
+        return this.goto(this.parseLiteralString)
+      }
+    }
+    parseLiteralString () {
+      do {
+        if (this.char === CHAR_APOS) {
+          return this.return()
+        } else if (this.atEndOfLine()) {
+          throw this.error(new TomlError('Unterminated string'))
+        } else if (this.char === CHAR_DEL || (this.char <= CTRL_CHAR_BOUNDARY && this.char !== CTRL_I)) {
+          throw this.errorControlCharInString()
+        } else {
+          this.consume()
+        }
+      } while (this.nextChar())
+    }
+    parseLiteralMultiStringMaybe () {
+      if (this.char === CHAR_APOS) {
+        return this.next(this.parseLiteralMultiString)
+      } else {
+        return this.returnNow()
+      }
+    }
+    parseLiteralMultiString () {
+      if (this.char === CTRL_M) {
+        return null
+      } else if (this.char === CTRL_J) {
+        return this.next(this.parseLiteralMultiStringContent)
+      } else {
+        return this.goto(this.parseLiteralMultiStringContent)
+      }
+    }
+    parseLiteralMultiStringContent () {
+      do {
+        if (this.char === CHAR_APOS) {
+          return this.next(this.parseLiteralMultiEnd)
+        } else if (this.char === Parser.END) {
+          throw this.error(new TomlError('Unterminated multi-line string'))
+        } else if (this.char === CHAR_DEL || (this.char <= CTRL_CHAR_BOUNDARY && this.char !== CTRL_I && this.char !== CTRL_J && this.char !== CTRL_M)) {
+          throw this.errorControlCharInString()
+        } else {
+          this.consume()
+        }
+      } while (this.nextChar())
+    }
+    parseLiteralMultiEnd () {
+      if (this.char === CHAR_APOS) {
+        return this.next(this.parseLiteralMultiEnd2)
+      } else {
+        this.state.buf += "'"
+        return this.goto(this.parseLiteralMultiStringContent)
+      }
+    }
+    parseLiteralMultiEnd2 () {
+      if (this.char === CHAR_APOS) {
+        return this.return()
+      } else {
+        this.state.buf += "''"
+        return this.goto(this.parseLiteralMultiStringContent)
+      }
+    }
+
+    /* STRINGS double quoted */
+    parseDoubleString () {
+      if (this.char === CHAR_QUOT) {
+        return this.next(this.parseMultiStringMaybe)
+      } else {
+        return this.goto(this.parseBasicString)
+      }
+    }
+    parseBasicString () {
+      do {
+        if (this.char === CHAR_BSOL) {
+          return this.call(this.parseEscape, this.recordEscapeReplacement)
+        } else if (this.char === CHAR_QUOT) {
+          return this.return()
+        } else if (this.atEndOfLine()) {
+          throw this.error(new TomlError('Unterminated string'))
+        } else if (this.char === CHAR_DEL || (this.char <= CTRL_CHAR_BOUNDARY && this.char !== CTRL_I)) {
+          throw this.errorControlCharInString()
+        } else {
+          this.consume()
+        }
+      } while (this.nextChar())
+    }
+    recordEscapeReplacement (replacement) {
+      this.state.buf += replacement
+      return this.goto(this.parseBasicString)
+    }
+    parseMultiStringMaybe () {
+      if (this.char === CHAR_QUOT) {
+        return this.next(this.parseMultiString)
+      } else {
+        return this.returnNow()
+      }
+    }
+    parseMultiString () {
+      if (this.char === CTRL_M) {
+        return null
+      } else if (this.char === CTRL_J) {
+        return this.next(this.parseMultiStringContent)
+      } else {
+        return this.goto(this.parseMultiStringContent)
+      }
+    }
+    parseMultiStringContent () {
+      do {
+        if (this.char === CHAR_BSOL) {
+          return this.call(this.parseMultiEscape, this.recordMultiEscapeReplacement)
+        } else if (this.char === CHAR_QUOT) {
+          return this.next(this.parseMultiEnd)
+        } else if (this.char === Parser.END) {
+          throw this.error(new TomlError('Unterminated multi-line string'))
+        } else if (this.char === CHAR_DEL || (this.char <= CTRL_CHAR_BOUNDARY && this.char !== CTRL_I && this.char !== CTRL_J && this.char !== CTRL_M)) {
+          throw this.errorControlCharInString()
+        } else {
+          this.consume()
+        }
+      } while (this.nextChar())
+    }
+    errorControlCharInString () {
+      let displayCode = '\\u00'
+      if (this.char < 16) {
+        displayCode += '0'
+      }
+      displayCode += this.char.toString(16)
+
+      return this.error(new TomlError(`Control characters (codes < 0x1f and 0x7f) are not allowed in strings, use ${displayCode} instead`))
+    }
+    recordMultiEscapeReplacement (replacement) {
+      this.state.buf += replacement
+      return this.goto(this.parseMultiStringContent)
+    }
+    parseMultiEnd () {
+      if (this.char === CHAR_QUOT) {
+        return this.next(this.parseMultiEnd2)
+      } else {
+        this.state.buf += '"'
+        return this.goto(this.parseMultiStringContent)
+      }
+    }
+    parseMultiEnd2 () {
+      if (this.char === CHAR_QUOT) {
+        return this.return()
+      } else {
+        this.state.buf += '""'
+        return this.goto(this.parseMultiStringContent)
+      }
+    }
+    parseMultiEscape () {
+      if (this.char === CTRL_M || this.char === CTRL_J) {
+        return this.next(this.parseMultiTrim)
+      } else if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return this.next(this.parsePreMultiTrim)
+      } else {
+        return this.goto(this.parseEscape)
+      }
+    }
+    parsePreMultiTrim () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else if (this.char === CTRL_M || this.char === CTRL_J) {
+        return this.next(this.parseMultiTrim)
+      } else {
+        throw this.error(new TomlError("Can't escape whitespace"))
+      }
+    }
+    parseMultiTrim () {
+      // explicitly whitespace here, END should follow the same path as chars
+      if (this.char === CTRL_J || this.char === CHAR_SP || this.char === CTRL_I || this.char === CTRL_M) {
+        return null
+      } else {
+        return this.returnNow()
+      }
+    }
+    parseEscape () {
+      if (this.char in escapes) {
+        return this.return(escapes[this.char])
+      } else if (this.char === CHAR_u) {
+        return this.call(this.parseSmallUnicode, this.parseUnicodeReturn)
+      } else if (this.char === CHAR_U) {
+        return this.call(this.parseLargeUnicode, this.parseUnicodeReturn)
+      } else {
+        throw this.error(new TomlError('Unknown escape character: ' + this.char))
+      }
+    }
+    parseUnicodeReturn (char) {
+      try {
+        const codePoint = parseInt(char, 16)
+        if (codePoint >= SURROGATE_FIRST && codePoint <= SURROGATE_LAST) {
+          throw this.error(new TomlError('Invalid unicode, character in range 0xD800 - 0xDFFF is reserved'))
+        }
+        return this.returnNow(String.fromCodePoint(codePoint))
+      } catch (err) {
+        throw this.error(TomlError.wrap(err))
+      }
+    }
+    parseSmallUnicode () {
+      if (!isHexit(this.char)) {
+        throw this.error(new TomlError('Invalid character in unicode sequence, expected hex'))
+      } else {
+        this.consume()
+        if (this.state.buf.length >= 4) return this.return()
+      }
+    }
+    parseLargeUnicode () {
+      if (!isHexit(this.char)) {
+        throw this.error(new TomlError('Invalid character in unicode sequence, expected hex'))
+      } else {
+        this.consume()
+        if (this.state.buf.length >= 8) return this.return()
+      }
+    }
+
+    /* NUMBERS */
+    parseNumberSign () {
+      this.consume()
+      return this.next(this.parseMaybeSignedInfOrNan)
+    }
+    parseMaybeSignedInfOrNan () {
+      if (this.char === CHAR_i) {
+        return this.next(this.parseInf)
+      } else if (this.char === CHAR_n) {
+        return this.next(this.parseNan)
+      } else {
+        return this.callNow(this.parseNoUnder, this.parseNumberIntegerStart)
+      }
+    }
+    parseNumberIntegerStart () {
+      if (this.char === CHAR_0) {
+        this.consume()
+        return this.next(this.parseNumberIntegerExponentOrDecimal)
+      } else {
+        return this.goto(this.parseNumberInteger)
+      }
+    }
+    parseNumberIntegerExponentOrDecimal () {
+      if (this.char === CHAR_PERIOD) {
+        this.consume()
+        return this.call(this.parseNoUnder, this.parseNumberFloat)
+      } else if (this.char === CHAR_E || this.char === CHAR_e) {
+        this.consume()
+        return this.next(this.parseNumberExponentSign)
+      } else {
+        return this.returnNow(Integer(this.state.buf))
+      }
+    }
+    parseNumberInteger () {
+      if (isDigit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnder)
+      } else if (this.char === CHAR_E || this.char === CHAR_e) {
+        this.consume()
+        return this.next(this.parseNumberExponentSign)
+      } else if (this.char === CHAR_PERIOD) {
+        this.consume()
+        return this.call(this.parseNoUnder, this.parseNumberFloat)
+      } else {
+        const result = Integer(this.state.buf)
+        /* istanbul ignore if */
+        if (result.isNaN()) {
+          throw this.error(new TomlError('Invalid number'))
+        } else {
+          return this.returnNow(result)
+        }
+      }
+    }
+    parseNoUnder () {
+      if (this.char === CHAR_LOWBAR || this.char === CHAR_PERIOD || this.char === CHAR_E || this.char === CHAR_e) {
+        throw this.error(new TomlError('Unexpected character, expected digit'))
+      } else if (this.atEndOfWord()) {
+        throw this.error(new TomlError('Incomplete number'))
+      }
+      return this.returnNow()
+    }
+    parseNoUnderHexOctBinLiteral () {
+      if (this.char === CHAR_LOWBAR || this.char === CHAR_PERIOD) {
+        throw this.error(new TomlError('Unexpected character, expected digit'))
+      } else if (this.atEndOfWord()) {
+        throw this.error(new TomlError('Incomplete number'))
+      }
+      return this.returnNow()
+    }
+    parseNumberFloat () {
+      if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnder, this.parseNumberFloat)
+      } else if (isDigit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_E || this.char === CHAR_e) {
+        this.consume()
+        return this.next(this.parseNumberExponentSign)
+      } else {
+        return this.returnNow(Float(this.state.buf))
+      }
+    }
+    parseNumberExponentSign () {
+      if (isDigit(this.char)) {
+        return this.goto(this.parseNumberExponent)
+      } else if (this.char === CHAR_HYPHEN || this.char === CHAR_PLUS) {
+        this.consume()
+        this.call(this.parseNoUnder, this.parseNumberExponent)
+      } else {
+        throw this.error(new TomlError('Unexpected character, expected -, + or digit'))
+      }
+    }
+    parseNumberExponent () {
+      if (isDigit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnder)
+      } else {
+        return this.returnNow(Float(this.state.buf))
+      }
+    }
+
+    /* NUMBERS or DATETIMES  */
+    parseNumberOrDateTime () {
+      if (this.char === CHAR_0) {
+        this.consume()
+        return this.next(this.parseNumberBaseOrDateTime)
+      } else {
+        return this.goto(this.parseNumberOrDateTimeOnly)
+      }
+    }
+    parseNumberOrDateTimeOnly () {
+      // note, if two zeros are in a row then it MUST be a date
+      if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnder, this.parseNumberInteger)
+      } else if (isDigit(this.char)) {
+        this.consume()
+        if (this.state.buf.length > 4) this.next(this.parseNumberInteger)
+      } else if (this.char === CHAR_E || this.char === CHAR_e) {
+        this.consume()
+        return this.next(this.parseNumberExponentSign)
+      } else if (this.char === CHAR_PERIOD) {
+        this.consume()
+        return this.call(this.parseNoUnder, this.parseNumberFloat)
+      } else if (this.char === CHAR_HYPHEN) {
+        return this.goto(this.parseDateTime)
+      } else if (this.char === CHAR_COLON) {
+        return this.goto(this.parseOnlyTimeHour)
+      } else {
+        return this.returnNow(Integer(this.state.buf))
+      }
+    }
+    parseDateTimeOnly () {
+      if (this.state.buf.length < 4) {
+        if (isDigit(this.char)) {
+          return this.consume()
+        } else if (this.char === CHAR_COLON) {
+          return this.goto(this.parseOnlyTimeHour)
+        } else {
+          throw this.error(new TomlError('Expected digit while parsing year part of a date'))
+        }
+      } else {
+        if (this.char === CHAR_HYPHEN) {
+          return this.goto(this.parseDateTime)
+        } else {
+          throw this.error(new TomlError('Expected hyphen (-) while parsing year part of date'))
+        }
+      }
+    }
+    parseNumberBaseOrDateTime () {
+      if (this.char === CHAR_b) {
+        this.consume()
+        return this.call(this.parseNoUnderHexOctBinLiteral, this.parseIntegerBin)
+      } else if (this.char === CHAR_o) {
+        this.consume()
+        return this.call(this.parseNoUnderHexOctBinLiteral, this.parseIntegerOct)
+      } else if (this.char === CHAR_x) {
+        this.consume()
+        return this.call(this.parseNoUnderHexOctBinLiteral, this.parseIntegerHex)
+      } else if (this.char === CHAR_PERIOD) {
+        return this.goto(this.parseNumberInteger)
+      } else if (isDigit(this.char)) {
+        return this.goto(this.parseDateTimeOnly)
+      } else {
+        return this.returnNow(Integer(this.state.buf))
+      }
+    }
+    parseIntegerHex () {
+      if (isHexit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnderHexOctBinLiteral)
+      } else {
+        const result = Integer(this.state.buf)
+        /* istanbul ignore if */
+        if (result.isNaN()) {
+          throw this.error(new TomlError('Invalid number'))
+        } else {
+          return this.returnNow(result)
+        }
+      }
+    }
+    parseIntegerOct () {
+      if (isOctit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnderHexOctBinLiteral)
+      } else {
+        const result = Integer(this.state.buf)
+        /* istanbul ignore if */
+        if (result.isNaN()) {
+          throw this.error(new TomlError('Invalid number'))
+        } else {
+          return this.returnNow(result)
+        }
+      }
+    }
+    parseIntegerBin () {
+      if (isBit(this.char)) {
+        this.consume()
+      } else if (this.char === CHAR_LOWBAR) {
+        return this.call(this.parseNoUnderHexOctBinLiteral)
+      } else {
+        const result = Integer(this.state.buf)
+        /* istanbul ignore if */
+        if (result.isNaN()) {
+          throw this.error(new TomlError('Invalid number'))
+        } else {
+          return this.returnNow(result)
+        }
+      }
+    }
+
+    /* DATETIME */
+    parseDateTime () {
+      // we enter here having just consumed the year and about to consume the hyphen
+      if (this.state.buf.length < 4) {
+        throw this.error(new TomlError('Years less than 1000 must be zero padded to four characters'))
+      }
+      this.state.result = this.state.buf
+      this.state.buf = ''
+      return this.next(this.parseDateMonth)
+    }
+    parseDateMonth () {
+      if (this.char === CHAR_HYPHEN) {
+        if (this.state.buf.length < 2) {
+          throw this.error(new TomlError('Months less than 10 must be zero padded to two characters'))
+        }
+        this.state.result += '-' + this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseDateDay)
+      } else if (isDigit(this.char)) {
+        this.consume()
+      } else {
+        throw this.error(new TomlError('Incomplete datetime'))
+      }
+    }
+    parseDateDay () {
+      if (this.char === CHAR_T || this.char === CHAR_SP) {
+        if (this.state.buf.length < 2) {
+          throw this.error(new TomlError('Days less than 10 must be zero padded to two characters'))
+        }
+        this.state.result += '-' + this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseStartTimeHour)
+      } else if (this.atEndOfWord()) {
+        return this.returnNow(createDate(this.state.result + '-' + this.state.buf))
+      } else if (isDigit(this.char)) {
+        this.consume()
+      } else {
+        throw this.error(new TomlError('Incomplete datetime'))
+      }
+    }
+    parseStartTimeHour () {
+      if (this.atEndOfWord()) {
+        return this.returnNow(createDate(this.state.result))
+      } else {
+        return this.goto(this.parseTimeHour)
+      }
+    }
+    parseTimeHour () {
+      if (this.char === CHAR_COLON) {
+        if (this.state.buf.length < 2) {
+          throw this.error(new TomlError('Hours less than 10 must be zero padded to two characters'))
+        }
+        this.state.result += 'T' + this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseTimeMin)
+      } else if (isDigit(this.char)) {
+        this.consume()
+      } else {
+        throw this.error(new TomlError('Incomplete datetime'))
+      }
+    }
+    parseTimeMin () {
+      if (this.state.buf.length < 2 && isDigit(this.char)) {
+        this.consume()
+      } else if (this.state.buf.length === 2 && this.char === CHAR_COLON) {
+        this.state.result += ':' + this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseTimeSec)
+      } else {
+        throw this.error(new TomlError('Incomplete datetime'))
+      }
+    }
+    parseTimeSec () {
+      if (isDigit(this.char)) {
+        this.consume()
+        if (this.state.buf.length === 2) {
+          this.state.result += ':' + this.state.buf
+          this.state.buf = ''
+          return this.next(this.parseTimeZoneOrFraction)
+        }
+      } else {
+        throw this.error(new TomlError('Incomplete datetime'))
+      }
+    }
+
+    parseOnlyTimeHour () {
+      /* istanbul ignore else */
+      if (this.char === CHAR_COLON) {
+        if (this.state.buf.length < 2) {
+          throw this.error(new TomlError('Hours less than 10 must be zero padded to two characters'))
+        }
+        this.state.result = this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseOnlyTimeMin)
+      } else {
+        throw this.error(new TomlError('Incomplete time'))
+      }
+    }
+    parseOnlyTimeMin () {
+      if (this.state.buf.length < 2 && isDigit(this.char)) {
+        this.consume()
+      } else if (this.state.buf.length === 2 && this.char === CHAR_COLON) {
+        this.state.result += ':' + this.state.buf
+        this.state.buf = ''
+        return this.next(this.parseOnlyTimeSec)
+      } else {
+        throw this.error(new TomlError('Incomplete time'))
+      }
+    }
+    parseOnlyTimeSec () {
+      if (isDigit(this.char)) {
+        this.consume()
+        if (this.state.buf.length === 2) {
+          return this.next(this.parseOnlyTimeFractionMaybe)
+        }
+      } else {
+        throw this.error(new TomlError('Incomplete time'))
+      }
+    }
+    parseOnlyTimeFractionMaybe () {
+      this.state.result += ':' + this.state.buf
+      if (this.char === CHAR_PERIOD) {
+        this.state.buf = ''
+        this.next(this.parseOnlyTimeFraction)
+      } else {
+        return this.return(createTime(this.state.result))
+      }
+    }
+    parseOnlyTimeFraction () {
+      if (isDigit(this.char)) {
+        this.consume()
+      } else if (this.atEndOfWord()) {
+        if (this.state.buf.length === 0) throw this.error(new TomlError('Expected digit in milliseconds'))
+        return this.returnNow(createTime(this.state.result + '.' + this.state.buf))
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected period (.), minus (-), plus (+) or Z'))
+      }
+    }
+
+    parseTimeZoneOrFraction () {
+      if (this.char === CHAR_PERIOD) {
+        this.consume()
+        this.next(this.parseDateTimeFraction)
+      } else if (this.char === CHAR_HYPHEN || this.char === CHAR_PLUS) {
+        this.consume()
+        this.next(this.parseTimeZoneHour)
+      } else if (this.char === CHAR_Z) {
+        this.consume()
+        return this.return(createDateTime(this.state.result + this.state.buf))
+      } else if (this.atEndOfWord()) {
+        return this.returnNow(createDateTimeFloat(this.state.result + this.state.buf))
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected period (.), minus (-), plus (+) or Z'))
+      }
+    }
+    parseDateTimeFraction () {
+      if (isDigit(this.char)) {
+        this.consume()
+      } else if (this.state.buf.length === 1) {
+        throw this.error(new TomlError('Expected digit in milliseconds'))
+      } else if (this.char === CHAR_HYPHEN || this.char === CHAR_PLUS) {
+        this.consume()
+        this.next(this.parseTimeZoneHour)
+      } else if (this.char === CHAR_Z) {
+        this.consume()
+        return this.return(createDateTime(this.state.result + this.state.buf))
+      } else if (this.atEndOfWord()) {
+        return this.returnNow(createDateTimeFloat(this.state.result + this.state.buf))
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected period (.), minus (-), plus (+) or Z'))
+      }
+    }
+    parseTimeZoneHour () {
+      if (isDigit(this.char)) {
+        this.consume()
+        // FIXME: No more regexps
+        if (/\d\d$/.test(this.state.buf)) return this.next(this.parseTimeZoneSep)
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected digit'))
+      }
+    }
+    parseTimeZoneSep () {
+      if (this.char === CHAR_COLON) {
+        this.consume()
+        this.next(this.parseTimeZoneMin)
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected colon'))
+      }
+    }
+    parseTimeZoneMin () {
+      if (isDigit(this.char)) {
+        this.consume()
+        if (/\d\d$/.test(this.state.buf)) return this.return(createDateTime(this.state.result + this.state.buf))
+      } else {
+        throw this.error(new TomlError('Unexpected character in datetime, expected digit'))
+      }
+    }
+
+    /* BOOLEAN */
+    parseBoolean () {
+      /* istanbul ignore else */
+      if (this.char === CHAR_t) {
+        this.consume()
+        return this.next(this.parseTrue_r)
+      } else if (this.char === CHAR_f) {
+        this.consume()
+        return this.next(this.parseFalse_a)
+      }
+    }
+    parseTrue_r () {
+      if (this.char === CHAR_r) {
+        this.consume()
+        return this.next(this.parseTrue_u)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+    parseTrue_u () {
+      if (this.char === CHAR_u) {
+        this.consume()
+        return this.next(this.parseTrue_e)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+    parseTrue_e () {
+      if (this.char === CHAR_e) {
+        return this.return(true)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+
+    parseFalse_a () {
+      if (this.char === CHAR_a) {
+        this.consume()
+        return this.next(this.parseFalse_l)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+
+    parseFalse_l () {
+      if (this.char === CHAR_l) {
+        this.consume()
+        return this.next(this.parseFalse_s)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+
+    parseFalse_s () {
+      if (this.char === CHAR_s) {
+        this.consume()
+        return this.next(this.parseFalse_e)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+
+    parseFalse_e () {
+      if (this.char === CHAR_e) {
+        return this.return(false)
+      } else {
+        throw this.error(new TomlError('Invalid boolean, expected true or false'))
+      }
+    }
+
+    /* INLINE LISTS */
+    parseInlineList () {
+      if (this.char === CHAR_SP || this.char === CTRL_I || this.char === CTRL_M || this.char === CTRL_J) {
+        return null
+      } else if (this.char === Parser.END) {
+        throw this.error(new TomlError('Unterminated inline array'))
+      } else if (this.char === CHAR_NUM) {
+        return this.call(this.parseComment)
+      } else if (this.char === CHAR_RSQB) {
+        return this.return(this.state.resultArr || InlineList())
+      } else {
+        return this.callNow(this.parseValue, this.recordInlineListValue)
+      }
+    }
+    recordInlineListValue (value) {
+      if (this.state.resultArr) {
+        const listType = this.state.resultArr[_contentType]
+        const valueType = tomlType(value)
+        if (listType !== valueType) {
+          throw this.error(new TomlError(`Inline lists must be a single type, not a mix of ${listType} and ${valueType}`))
+        }
+      } else {
+        this.state.resultArr = InlineList(tomlType(value))
+      }
+      if (isFloat(value) || isInteger(value)) {
+        // unbox now that we've verified they're ok
+        this.state.resultArr.push(value.valueOf())
+      } else {
+        this.state.resultArr.push(value)
+      }
+      return this.goto(this.parseInlineListNext)
+    }
+    parseInlineListNext () {
+      if (this.char === CHAR_SP || this.char === CTRL_I || this.char === CTRL_M || this.char === CTRL_J) {
+        return null
+      } else if (this.char === CHAR_NUM) {
+        return this.call(this.parseComment)
+      } else if (this.char === CHAR_COMMA) {
+        return this.next(this.parseInlineList)
+      } else if (this.char === CHAR_RSQB) {
+        return this.goto(this.parseInlineList)
+      } else {
+        throw this.error(new TomlError('Invalid character, expected whitespace, comma (,) or close bracket (])'))
+      }
+    }
+
+    /* INLINE TABLE */
+    parseInlineTable () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else if (this.char === Parser.END || this.char === CHAR_NUM || this.char === CTRL_J || this.char === CTRL_M) {
+        throw this.error(new TomlError('Unterminated inline array'))
+      } else if (this.char === CHAR_RCUB) {
+        return this.return(this.state.resultTable || InlineTable())
+      } else {
+        if (!this.state.resultTable) this.state.resultTable = InlineTable()
+        return this.callNow(this.parseAssign, this.recordInlineTableValue)
+      }
+    }
+    recordInlineTableValue (kv) {
+      let target = this.state.resultTable
+      let finalKey = kv.key.pop()
+      for (let kw of kv.key) {
+        if (hasKey(target, kw) && (!isTable(target[kw]) || target[kw][_declared])) {
+          throw this.error(new TomlError("Can't redefine existing key"))
+        }
+        target = target[kw] = target[kw] || Table()
+      }
+      if (hasKey(target, finalKey)) {
+        throw this.error(new TomlError("Can't redefine existing key"))
+      }
+      if (isInteger(kv.value) || isFloat(kv.value)) {
+        target[finalKey] = kv.value.valueOf()
+      } else {
+        target[finalKey] = kv.value
+      }
+      return this.goto(this.parseInlineTableNext)
+    }
+    parseInlineTableNext () {
+      if (this.char === CHAR_SP || this.char === CTRL_I) {
+        return null
+      } else if (this.char === Parser.END || this.char === CHAR_NUM || this.char === CTRL_J || this.char === CTRL_M) {
+        throw this.error(new TomlError('Unterminated inline array'))
+      } else if (this.char === CHAR_COMMA) {
+        return this.next(this.parseInlineTable)
+      } else if (this.char === CHAR_RCUB) {
+        return this.goto(this.parseInlineTable)
+      } else {
+        throw this.error(new TomlError('Invalid character, expected whitespace, comma (,) or close bracket (])'))
+      }
+    }
+  }
+  return TOMLParser
+}
+
+
+/***/ }),
+
+/***/ 1939:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+module.exports = parseAsync
+
+const TOMLParser = __nccwpck_require__(8784)
+const prettyError = __nccwpck_require__(7964)
+
+function parseAsync (str, opts) {
+  if (!opts) opts = {}
+  const index = 0
+  const blocksize = opts.blocksize || 40960
+  const parser = new TOMLParser()
+  return new Promise((resolve, reject) => {
+    setImmediate(parseAsyncNext, index, blocksize, resolve, reject)
+  })
+  function parseAsyncNext (index, blocksize, resolve, reject) {
+    if (index >= str.length) {
+      try {
+        return resolve(parser.finish())
+      } catch (err) {
+        return reject(prettyError(err, str))
+      }
+    }
+    try {
+      parser.parse(str.slice(index, index + blocksize))
+      setImmediate(parseAsyncNext, index + blocksize, blocksize, resolve, reject)
+    } catch (err) {
+      reject(prettyError(err, str))
+    }
+  }
+}
+
+
+/***/ }),
+
+/***/ 7964:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = prettyError
+
+function prettyError (err, buf) {
+  /* istanbul ignore if */
+  if (err.pos == null || err.line == null) return err
+  let msg = err.message
+  msg += ` at row ${err.line + 1}, col ${err.col + 1}, pos ${err.pos}:\n`
+
+  /* istanbul ignore else */
+  if (buf && buf.split) {
+    const lines = buf.split(/\n/)
+    const lineNumWidth = String(Math.min(lines.length, err.line + 3)).length
+    let linePadding = ' '
+    while (linePadding.length < lineNumWidth) linePadding += ' '
+    for (let ii = Math.max(0, err.line - 1); ii < Math.min(lines.length, err.line + 2); ++ii) {
+      let lineNum = String(ii + 1)
+      if (lineNum.length < lineNumWidth) lineNum = ' ' + lineNum
+      if (err.line === ii) {
+        msg += lineNum + '> ' + lines[ii] + '\n'
+        msg += linePadding + '  '
+        for (let hh = 0; hh < err.col; ++hh) {
+          msg += ' '
+        }
+        msg += '^\n'
+      } else {
+        msg += lineNum + ': ' + lines[ii] + '\n'
+      }
+    }
+  }
+  err.message = msg + '\n'
+  return err
+}
+
+
+/***/ }),
+
+/***/ 558:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+module.exports = parseStream
+
+const stream = __nccwpck_require__(2781)
+const TOMLParser = __nccwpck_require__(8784)
+
+function parseStream (stm) {
+  if (stm) {
+    return parseReadable(stm)
+  } else {
+    return parseTransform(stm)
+  }
+}
+
+function parseReadable (stm) {
+  const parser = new TOMLParser()
+  stm.setEncoding('utf8')
+  return new Promise((resolve, reject) => {
+    let readable
+    let ended = false
+    let errored = false
+    function finish () {
+      ended = true
+      if (readable) return
+      try {
+        resolve(parser.finish())
+      } catch (err) {
+        reject(err)
+      }
+    }
+    function error (err) {
+      errored = true
+      reject(err)
+    }
+    stm.once('end', finish)
+    stm.once('error', error)
+    readNext()
+
+    function readNext () {
+      readable = true
+      let data
+      while ((data = stm.read()) !== null) {
+        try {
+          parser.parse(data)
+        } catch (err) {
+          return error(err)
+        }
+      }
+      readable = false
+      /* istanbul ignore if */
+      if (ended) return finish()
+      /* istanbul ignore if */
+      if (errored) return
+      stm.once('readable', readNext)
+    }
+  })
+}
+
+function parseTransform () {
+  const parser = new TOMLParser()
+  return new stream.Transform({
+    objectMode: true,
+    transform (chunk, encoding, cb) {
+      try {
+        parser.parse(chunk.toString(encoding))
+      } catch (err) {
+        this.emit('error', err)
+      }
+      cb()
+    },
+    flush (cb) {
+      try {
+        this.push(parser.finish())
+      } catch (err) {
+        this.emit('error', err)
+      }
+      cb()
+    }
+  })
+}
+
+
+/***/ }),
+
+/***/ 5865:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+module.exports = parseString
+
+const TOMLParser = __nccwpck_require__(8784)
+const prettyError = __nccwpck_require__(7964)
+
+function parseString (str) {
+  if (global.Buffer && global.Buffer.isBuffer(str)) {
+    str = str.toString('utf8')
+  }
+  const parser = new TOMLParser()
+  try {
+    parser.parse(str)
+    return parser.finish()
+  } catch (err) {
+    throw prettyError(err, str)
+  }
+}
+
+
+/***/ }),
+
+/***/ 3848:
+/***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
+
+"use strict";
+
+module.exports = __nccwpck_require__(5865)
+module.exports.async = __nccwpck_require__(1939)
+module.exports.stream = __nccwpck_require__(558)
+module.exports.prettyError = __nccwpck_require__(7964)
+
+
+/***/ }),
+
+/***/ 6303:
+/***/ ((module) => {
+
+"use strict";
+
+module.exports = stringify
+module.exports.value = stringifyInline
+
+function stringify (obj) {
+  if (obj === null) throw typeError('null')
+  if (obj === void (0)) throw typeError('undefined')
+  if (typeof obj !== 'object') throw typeError(typeof obj)
+
+  if (typeof obj.toJSON === 'function') obj = obj.toJSON()
+  if (obj == null) return null
+  const type = tomlType(obj)
+  if (type !== 'table') throw typeError(type)
+  return stringifyObject('', '', obj)
+}
+
+function typeError (type) {
+  return new Error('Can only stringify objects, not ' + type)
+}
+
+function arrayOneTypeError () {
+  return new Error("Array values can't have mixed types")
+}
+
+function getInlineKeys (obj) {
+  return Object.keys(obj).filter(key => isInline(obj[key]))
+}
+function getComplexKeys (obj) {
+  return Object.keys(obj).filter(key => !isInline(obj[key]))
+}
+
+function toJSON (obj) {
+  let nobj = Array.isArray(obj) ? [] : Object.prototype.hasOwnProperty.call(obj, '__proto__') ? {['__proto__']: undefined} : {}
+  for (let prop of Object.keys(obj)) {
+    if (obj[prop] && typeof obj[prop].toJSON === 'function' && !('toISOString' in obj[prop])) {
+      nobj[prop] = obj[prop].toJSON()
+    } else {
+      nobj[prop] = obj[prop]
+    }
+  }
+  return nobj
+}
+
+function stringifyObject (prefix, indent, obj) {
+  obj = toJSON(obj)
+  var inlineKeys
+  var complexKeys
+  inlineKeys = getInlineKeys(obj)
+  complexKeys = getComplexKeys(obj)
+  var result = []
+  var inlineIndent = indent || ''
+  inlineKeys.forEach(key => {
+    var type = tomlType(obj[key])
+    if (type !== 'undefined' && type !== 'null') {
+      result.push(inlineIndent + stringifyKey(key) + ' = ' + stringifyAnyInline(obj[key], true))
+    }
+  })
+  if (result.length > 0) result.push('')
+  var complexIndent = prefix && inlineKeys.length > 0 ? indent + '  ' : ''
+  complexKeys.forEach(key => {
+    result.push(stringifyComplex(prefix, complexIndent, key, obj[key]))
+  })
+  return result.join('\n')
+}
+
+function isInline (value) {
+  switch (tomlType(value)) {
+    case 'undefined':
+    case 'null':
+    case 'integer':
+    case 'nan':
+    case 'float':
+    case 'boolean':
+    case 'string':
+    case 'datetime':
+      return true
+    case 'array':
+      return value.length === 0 || tomlType(value[0]) !== 'table'
+    case 'table':
+      return Object.keys(value).length === 0
+    /* istanbul ignore next */
+    default:
+      return false
+  }
+}
+
+function tomlType (value) {
+  if (value === undefined) {
+    return 'undefined'
+  } else if (value === null) {
+    return 'null'
+  /* eslint-disable valid-typeof */
+  } else if (typeof value === 'bigint' || (Number.isInteger(value) && !Object.is(value, -0))) {
+    return 'integer'
+  } else if (typeof value === 'number') {
+    return 'float'
+  } else if (typeof value === 'boolean') {
+    return 'boolean'
+  } else if (typeof value === 'string') {
+    return 'string'
+  } else if ('toISOString' in value) {
+    return isNaN(value) ? 'undefined' : 'datetime'
+  } else if (Array.isArray(value)) {
+    return 'array'
+  } else {
+    return 'table'
+  }
+}
+
+function stringifyKey (key) {
+  var keyStr = String(key)
+  if (/^[-A-Za-z0-9_]+$/.test(keyStr)) {
+    return keyStr
+  } else {
+    return stringifyBasicString(keyStr)
+  }
+}
+
+function stringifyBasicString (str) {
+  return '"' + escapeString(str).replace(/"/g, '\\"') + '"'
+}
+
+function stringifyLiteralString (str) {
+  return "'" + str + "'"
+}
+
+function numpad (num, str) {
+  while (str.length < num) str = '0' + str
+  return str
+}
+
+function escapeString (str) {
+  return str.replace(/\\/g, '\\\\')
+    .replace(/[\b]/g, '\\b')
+    .replace(/\t/g, '\\t')
+    .replace(/\n/g, '\\n')
+    .replace(/\f/g, '\\f')
+    .replace(/\r/g, '\\r')
+    /* eslint-disable no-control-regex */
+    .replace(/([\u0000-\u001f\u007f])/, c => '\\u' + numpad(4, c.codePointAt(0).toString(16)))
+    /* eslint-enable no-control-regex */
+}
+
+function stringifyMultilineString (str) {
+  let escaped = str.split(/\n/).map(str => {
+    return escapeString(str).replace(/"(?="")/g, '\\"')
+  }).join('\n')
+  if (escaped.slice(-1) === '"') escaped += '\\\n'
+  return '"""\n' + escaped + '"""'
+}
+
+function stringifyAnyInline (value, multilineOk) {
+  let type = tomlType(value)
+  if (type === 'string') {
+    if (multilineOk && /\n/.test(value)) {
+      type = 'string-multiline'
+    } else if (!/[\b\t\n\f\r']/.test(value) && /"/.test(value)) {
+      type = 'string-literal'
+    }
+  }
+  return stringifyInline(value, type)
+}
+
+function stringifyInline (value, type) {
+  /* istanbul ignore if */
+  if (!type) type = tomlType(value)
+  switch (type) {
+    case 'string-multiline':
+      return stringifyMultilineString(value)
+    case 'string':
+      return stringifyBasicString(value)
+    case 'string-literal':
+      return stringifyLiteralString(value)
+    case 'integer':
+      return stringifyInteger(value)
+    case 'float':
+      return stringifyFloat(value)
+    case 'boolean':
+      return stringifyBoolean(value)
+    case 'datetime':
+      return stringifyDatetime(value)
+    case 'array':
+      return stringifyInlineArray(value.filter(_ => tomlType(_) !== 'null' && tomlType(_) !== 'undefined' && tomlType(_) !== 'nan'))
+    case 'table':
+      return stringifyInlineTable(value)
+    /* istanbul ignore next */
+    default:
+      throw typeError(type)
+  }
+}
+
+function stringifyInteger (value) {
+  /* eslint-disable security/detect-unsafe-regex */
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, '_')
+}
+
+function stringifyFloat (value) {
+  if (value === Infinity) {
+    return 'inf'
+  } else if (value === -Infinity) {
+    return '-inf'
+  } else if (Object.is(value, NaN)) {
+    return 'nan'
+  } else if (Object.is(value, -0)) {
+    return '-0.0'
+  }
+  var chunks = String(value).split('.')
+  var int = chunks[0]
+  var dec = chunks[1] || 0
+  return stringifyInteger(int) + '.' + dec
+}
+
+function stringifyBoolean (value) {
+  return String(value)
+}
+
+function stringifyDatetime (value) {
+  return value.toISOString()
+}
+
+function isNumber (type) {
+  return type === 'float' || type === 'integer'
+}
+function arrayType (values) {
+  var contentType = tomlType(values[0])
+  if (values.every(_ => tomlType(_) === contentType)) return contentType
+  // mixed integer/float, emit as floats
+  if (values.every(_ => isNumber(tomlType(_)))) return 'float'
+  return 'mixed'
+}
+function validateArray (values) {
+  const type = arrayType(values)
+  if (type === 'mixed') {
+    throw arrayOneTypeError()
+  }
+  return type
+}
+
+function stringifyInlineArray (values) {
+  values = toJSON(values)
+  const type = validateArray(values)
+  var result = '['
+  var stringified = values.map(_ => stringifyInline(_, type))
+  if (stringified.join(', ').length > 60 || /\n/.test(stringified)) {
+    result += '\n  ' + stringified.join(',\n  ') + '\n'
+  } else {
+    result += ' ' + stringified.join(', ') + (stringified.length > 0 ? ' ' : '')
+  }
+  return result + ']'
+}
+
+function stringifyInlineTable (value) {
+  value = toJSON(value)
+  var result = []
+  Object.keys(value).forEach(key => {
+    result.push(stringifyKey(key) + ' = ' + stringifyAnyInline(value[key], false))
+  })
+  return '{ ' + result.join(', ') + (result.length > 0 ? ' ' : '') + '}'
+}
+
+function stringifyComplex (prefix, indent, key, value) {
+  var valueType = tomlType(value)
+  /* istanbul ignore else */
+  if (valueType === 'array') {
+    return stringifyArrayOfTables(prefix, indent, key, value)
+  } else if (valueType === 'table') {
+    return stringifyComplexTable(prefix, indent, key, value)
+  } else {
+    throw typeError(valueType)
+  }
+}
+
+function stringifyArrayOfTables (prefix, indent, key, values) {
+  values = toJSON(values)
+  validateArray(values)
+  var firstValueType = tomlType(values[0])
+  /* istanbul ignore if */
+  if (firstValueType !== 'table') throw typeError(firstValueType)
+  var fullKey = prefix + stringifyKey(key)
+  var result = ''
+  values.forEach(table => {
+    if (result.length > 0) result += '\n'
+    result += indent + '[[' + fullKey + ']]\n'
+    result += stringifyObject(fullKey + '.', indent, table)
+  })
+  return result
+}
+
+function stringifyComplexTable (prefix, indent, key, value) {
+  var fullKey = prefix + stringifyKey(key)
+  var result = ''
+  if (getInlineKeys(value).length > 0) {
+    result += indent + '[' + fullKey + ']\n'
+  }
+  return result + stringifyObject(fullKey + '.', indent, value)
+}
+
+
+/***/ }),
+
+/***/ 2901:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+exports.parse = __nccwpck_require__(3848)
+exports.stringify = __nccwpck_require__(6303)
+
+
+/***/ }),
+
 /***/ 7171:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -58031,6 +60323,7 @@ class Comparator {
       }
     }
 
+    comp = comp.trim().split(/\s+/).join(' ')
     debug('comparator', comp, options)
     this.options = options
     this.loose = !!options.loose
@@ -58093,13 +60386,6 @@ class Comparator {
       throw new TypeError('a Comparator is required')
     }
 
-    if (!options || typeof options !== 'object') {
-      options = {
-        loose: !!options,
-        includePrerelease: false,
-      }
-    }
-
     if (this.operator === '') {
       if (this.value === '') {
         return true
@@ -58112,39 +60398,50 @@ class Comparator {
       return new Range(this.value, options).test(comp.semver)
     }
 
-    const sameDirectionIncreasing =
-      (this.operator === '>=' || this.operator === '>') &&
-      (comp.operator === '>=' || comp.operator === '>')
-    const sameDirectionDecreasing =
-      (this.operator === '<=' || this.operator === '<') &&
-      (comp.operator === '<=' || comp.operator === '<')
-    const sameSemVer = this.semver.version === comp.semver.version
-    const differentDirectionsInclusive =
-      (this.operator === '>=' || this.operator === '<=') &&
-      (comp.operator === '>=' || comp.operator === '<=')
-    const oppositeDirectionsLessThan =
-      cmp(this.semver, '<', comp.semver, options) &&
-      (this.operator === '>=' || this.operator === '>') &&
-        (comp.operator === '<=' || comp.operator === '<')
-    const oppositeDirectionsGreaterThan =
-      cmp(this.semver, '>', comp.semver, options) &&
-      (this.operator === '<=' || this.operator === '<') &&
-        (comp.operator === '>=' || comp.operator === '>')
+    options = parseOptions(options)
 
-    return (
-      sameDirectionIncreasing ||
-      sameDirectionDecreasing ||
-      (sameSemVer && differentDirectionsInclusive) ||
-      oppositeDirectionsLessThan ||
-      oppositeDirectionsGreaterThan
-    )
+    // Special cases where nothing can possibly be lower
+    if (options.includePrerelease &&
+      (this.value === '<0.0.0-0' || comp.value === '<0.0.0-0')) {
+      return false
+    }
+    if (!options.includePrerelease &&
+      (this.value.startsWith('<0.0.0') || comp.value.startsWith('<0.0.0'))) {
+      return false
+    }
+
+    // Same direction increasing (> or >=)
+    if (this.operator.startsWith('>') && comp.operator.startsWith('>')) {
+      return true
+    }
+    // Same direction decreasing (< or <=)
+    if (this.operator.startsWith('<') && comp.operator.startsWith('<')) {
+      return true
+    }
+    // same SemVer and both sides are inclusive (<= or >=)
+    if (
+      (this.semver.version === comp.semver.version) &&
+      this.operator.includes('=') && comp.operator.includes('=')) {
+      return true
+    }
+    // opposite directions less than
+    if (cmp(this.semver, '<', comp.semver, options) &&
+      this.operator.startsWith('>') && comp.operator.startsWith('<')) {
+      return true
+    }
+    // opposite directions greater than
+    if (cmp(this.semver, '>', comp.semver, options) &&
+      this.operator.startsWith('<') && comp.operator.startsWith('>')) {
+      return true
+    }
+    return false
   }
 }
 
 module.exports = Comparator
 
 const parseOptions = __nccwpck_require__(785)
-const { re, t } = __nccwpck_require__(9523)
+const { safeRe: re, t } = __nccwpck_require__(9523)
 const cmp = __nccwpck_require__(5098)
 const debug = __nccwpck_require__(106)
 const SemVer = __nccwpck_require__(8088)
@@ -58184,19 +60481,26 @@ class Range {
     this.loose = !!options.loose
     this.includePrerelease = !!options.includePrerelease
 
-    // First, split based on boolean or ||
+    // First reduce all whitespace as much as possible so we do not have to rely
+    // on potentially slow regexes like \s*. This is then stored and used for
+    // future error messages as well.
     this.raw = range
-    this.set = range
+      .trim()
+      .split(/\s+/)
+      .join(' ')
+
+    // First, split on ||
+    this.set = this.raw
       .split('||')
       // map the range to a 2d array of comparators
-      .map(r => this.parseRange(r.trim()))
+      .map(r => this.parseRange(r))
       // throw out any comparator lists that are empty
       // this generally means that it was not a valid range, which is allowed
       // in loose mode, but will still throw if the WHOLE range is invalid.
       .filter(c => c.length)
 
     if (!this.set.length) {
-      throw new TypeError(`Invalid SemVer Range: ${range}`)
+      throw new TypeError(`Invalid SemVer Range: ${this.raw}`)
     }
 
     // if we have any that are not the null set, throw out null sets.
@@ -58222,9 +60526,7 @@ class Range {
 
   format () {
     this.range = this.set
-      .map((comps) => {
-        return comps.join(' ').trim()
-      })
+      .map((comps) => comps.join(' ').trim())
       .join('||')
       .trim()
     return this.range
@@ -58235,12 +60537,12 @@ class Range {
   }
 
   parseRange (range) {
-    range = range.trim()
-
     // memoize range parsing for performance.
     // this is a very hot path, and fully deterministic.
-    const memoOpts = Object.keys(this.options).join(',')
-    const memoKey = `parseRange:${memoOpts}:${range}`
+    const memoOpts =
+      (this.options.includePrerelease && FLAG_INCLUDE_PRERELEASE) |
+      (this.options.loose && FLAG_LOOSE)
+    const memoKey = memoOpts + ':' + range
     const cached = cache.get(memoKey)
     if (cached) {
       return cached
@@ -58260,9 +60562,6 @@ class Range {
 
     // `^ 1.2.3` => `^1.2.3`
     range = range.replace(re[t.CARETTRIM], caretTrimReplace)
-
-    // normalize spaces
-    range = range.split(/\s+/).join(' ')
 
     // At this point, the range is completely trimmed and
     // ready to be split into comparators.
@@ -58348,6 +60647,7 @@ class Range {
     return false
   }
 }
+
 module.exports = Range
 
 const LRU = __nccwpck_require__(7129)
@@ -58358,12 +60658,13 @@ const Comparator = __nccwpck_require__(1532)
 const debug = __nccwpck_require__(106)
 const SemVer = __nccwpck_require__(8088)
 const {
-  re,
+  safeRe: re,
   t,
   comparatorTrimReplace,
   tildeTrimReplace,
   caretTrimReplace,
 } = __nccwpck_require__(9523)
+const { FLAG_INCLUDE_PRERELEASE, FLAG_LOOSE } = __nccwpck_require__(2293)
 
 const isNullSet = c => c.value === '<0.0.0-0'
 const isAny = c => c.value === ''
@@ -58411,10 +60712,13 @@ const isX = id => !id || id.toLowerCase() === 'x' || id === '*'
 // ~1.2.3, ~>1.2.3 --> >=1.2.3 <1.3.0-0
 // ~1.2.0, ~>1.2.0 --> >=1.2.0 <1.3.0-0
 // ~0.0.1 --> >=0.0.1 <0.1.0-0
-const replaceTildes = (comp, options) =>
-  comp.trim().split(/\s+/).map((c) => {
-    return replaceTilde(c, options)
-  }).join(' ')
+const replaceTildes = (comp, options) => {
+  return comp
+    .trim()
+    .split(/\s+/)
+    .map((c) => replaceTilde(c, options))
+    .join(' ')
+}
 
 const replaceTilde = (comp, options) => {
   const r = options.loose ? re[t.TILDELOOSE] : re[t.TILDE]
@@ -58452,10 +60756,13 @@ const replaceTilde = (comp, options) => {
 // ^1.2.0 --> >=1.2.0 <2.0.0-0
 // ^0.0.1 --> >=0.0.1 <0.0.2-0
 // ^0.1.0 --> >=0.1.0 <0.2.0-0
-const replaceCarets = (comp, options) =>
-  comp.trim().split(/\s+/).map((c) => {
-    return replaceCaret(c, options)
-  }).join(' ')
+const replaceCarets = (comp, options) => {
+  return comp
+    .trim()
+    .split(/\s+/)
+    .map((c) => replaceCaret(c, options))
+    .join(' ')
+}
 
 const replaceCaret = (comp, options) => {
   debug('caret', comp, options)
@@ -58512,9 +60819,10 @@ const replaceCaret = (comp, options) => {
 
 const replaceXRanges = (comp, options) => {
   debug('replaceXRanges', comp, options)
-  return comp.split(/\s+/).map((c) => {
-    return replaceXRange(c, options)
-  }).join(' ')
+  return comp
+    .split(/\s+/)
+    .map((c) => replaceXRange(c, options))
+    .join(' ')
 }
 
 const replaceXRange = (comp, options) => {
@@ -58597,12 +60905,15 @@ const replaceXRange = (comp, options) => {
 const replaceStars = (comp, options) => {
   debug('replaceStars', comp, options)
   // Looseness is ignored here.  star is always as loose as it gets!
-  return comp.trim().replace(re[t.STAR], '')
+  return comp
+    .trim()
+    .replace(re[t.STAR], '')
 }
 
 const replaceGTE0 = (comp, options) => {
   debug('replaceGTE0', comp, options)
-  return comp.trim()
+  return comp
+    .trim()
     .replace(re[options.includePrerelease ? t.GTE0PRE : t.GTE0], '')
 }
 
@@ -58640,7 +60951,7 @@ const hyphenReplace = incPr => ($0,
     to = `<=${to}`
   }
 
-  return (`${from} ${to}`).trim()
+  return `${from} ${to}`.trim()
 }
 
 const testSet = (set, version, options) => {
@@ -58687,7 +60998,7 @@ const testSet = (set, version, options) => {
 
 const debug = __nccwpck_require__(106)
 const { MAX_LENGTH, MAX_SAFE_INTEGER } = __nccwpck_require__(2293)
-const { re, t } = __nccwpck_require__(9523)
+const { safeRe: re, t } = __nccwpck_require__(9523)
 
 const parseOptions = __nccwpck_require__(785)
 const { compareIdentifiers } = __nccwpck_require__(2463)
@@ -58703,7 +61014,7 @@ class SemVer {
         version = version.version
       }
     } else if (typeof version !== 'string') {
-      throw new TypeError(`Invalid Version: ${version}`)
+      throw new TypeError(`Invalid version. Must be a string. Got type "${typeof version}".`)
     }
 
     if (version.length > MAX_LENGTH) {
@@ -58862,36 +61173,36 @@ class SemVer {
 
   // preminor will bump the version up to the next minor release, and immediately
   // down to pre-release. premajor and prepatch work the same way.
-  inc (release, identifier) {
+  inc (release, identifier, identifierBase) {
     switch (release) {
       case 'premajor':
         this.prerelease.length = 0
         this.patch = 0
         this.minor = 0
         this.major++
-        this.inc('pre', identifier)
+        this.inc('pre', identifier, identifierBase)
         break
       case 'preminor':
         this.prerelease.length = 0
         this.patch = 0
         this.minor++
-        this.inc('pre', identifier)
+        this.inc('pre', identifier, identifierBase)
         break
       case 'prepatch':
         // If this is already a prerelease, it will bump to the next version
         // drop any prereleases that might already exist, since they are not
         // relevant at this point.
         this.prerelease.length = 0
-        this.inc('patch', identifier)
-        this.inc('pre', identifier)
+        this.inc('patch', identifier, identifierBase)
+        this.inc('pre', identifier, identifierBase)
         break
       // If the input is a non-prerelease version, this acts the same as
       // prepatch.
       case 'prerelease':
         if (this.prerelease.length === 0) {
-          this.inc('patch', identifier)
+          this.inc('patch', identifier, identifierBase)
         }
-        this.inc('pre', identifier)
+        this.inc('pre', identifier, identifierBase)
         break
 
       case 'major':
@@ -58933,9 +61244,15 @@ class SemVer {
         break
       // This probably shouldn't be used publicly.
       // 1.0.0 'pre' would become 1.0.0-0 which is the wrong direction.
-      case 'pre':
+      case 'pre': {
+        const base = Number(identifierBase) ? 1 : 0
+
+        if (!identifier && identifierBase === false) {
+          throw new Error('invalid increment argument: identifier is empty')
+        }
+
         if (this.prerelease.length === 0) {
-          this.prerelease = [0]
+          this.prerelease = [base]
         } else {
           let i = this.prerelease.length
           while (--i >= 0) {
@@ -58946,27 +61263,36 @@ class SemVer {
           }
           if (i === -1) {
             // didn't increment anything
-            this.prerelease.push(0)
+            if (identifier === this.prerelease.join('.') && identifierBase === false) {
+              throw new Error('invalid increment argument: identifier already exists')
+            }
+            this.prerelease.push(base)
           }
         }
         if (identifier) {
           // 1.2.0-beta.1 bumps to 1.2.0-beta.2,
           // 1.2.0-beta.fooblz or 1.2.0-beta bumps to 1.2.0-beta.0
+          let prerelease = [identifier, base]
+          if (identifierBase === false) {
+            prerelease = [identifier]
+          }
           if (compareIdentifiers(this.prerelease[0], identifier) === 0) {
             if (isNaN(this.prerelease[1])) {
-              this.prerelease = [identifier, 0]
+              this.prerelease = prerelease
             }
           } else {
-            this.prerelease = [identifier, 0]
+            this.prerelease = prerelease
           }
         }
         break
-
+      }
       default:
         throw new Error(`invalid increment argument: ${release}`)
     }
-    this.format()
-    this.raw = this.version
+    this.raw = this.format()
+    if (this.build.length) {
+      this.raw += `+${this.build.join('.')}`
+    }
     return this
   }
 }
@@ -59053,7 +61379,7 @@ module.exports = cmp
 
 const SemVer = __nccwpck_require__(8088)
 const parse = __nccwpck_require__(5925)
-const { re, t } = __nccwpck_require__(9523)
+const { safeRe: re, t } = __nccwpck_require__(9523)
 
 const coerce = (version, options) => {
   if (version instanceof SemVer) {
@@ -59147,27 +61473,69 @@ module.exports = compare
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
 const parse = __nccwpck_require__(5925)
-const eq = __nccwpck_require__(1898)
 
 const diff = (version1, version2) => {
-  if (eq(version1, version2)) {
+  const v1 = parse(version1, null, true)
+  const v2 = parse(version2, null, true)
+  const comparison = v1.compare(v2)
+
+  if (comparison === 0) {
     return null
-  } else {
-    const v1 = parse(version1)
-    const v2 = parse(version2)
-    const hasPre = v1.prerelease.length || v2.prerelease.length
-    const prefix = hasPre ? 'pre' : ''
-    const defaultResult = hasPre ? 'prerelease' : ''
-    for (const key in v1) {
-      if (key === 'major' || key === 'minor' || key === 'patch') {
-        if (v1[key] !== v2[key]) {
-          return prefix + key
-        }
-      }
-    }
-    return defaultResult // may be undefined
   }
+
+  const v1Higher = comparison > 0
+  const highVersion = v1Higher ? v1 : v2
+  const lowVersion = v1Higher ? v2 : v1
+  const highHasPre = !!highVersion.prerelease.length
+  const lowHasPre = !!lowVersion.prerelease.length
+
+  if (lowHasPre && !highHasPre) {
+    // Going from prerelease -> no prerelease requires some special casing
+
+    // If the low version has only a major, then it will always be a major
+    // Some examples:
+    // 1.0.0-1 -> 1.0.0
+    // 1.0.0-1 -> 1.1.1
+    // 1.0.0-1 -> 2.0.0
+    if (!lowVersion.patch && !lowVersion.minor) {
+      return 'major'
+    }
+
+    // Otherwise it can be determined by checking the high version
+
+    if (highVersion.patch) {
+      // anything higher than a patch bump would result in the wrong version
+      return 'patch'
+    }
+
+    if (highVersion.minor) {
+      // anything higher than a minor bump would result in the wrong version
+      return 'minor'
+    }
+
+    // bumping major/minor/patch all have same result
+    return 'major'
+  }
+
+  // add the `pre` prefix if we are going to a prerelease version
+  const prefix = highHasPre ? 'pre' : ''
+
+  if (v1.major !== v2.major) {
+    return prefix + 'major'
+  }
+
+  if (v1.minor !== v2.minor) {
+    return prefix + 'minor'
+  }
+
+  if (v1.patch !== v2.patch) {
+    return prefix + 'patch'
+  }
+
+  // high and low are preleases
+  return 'prerelease'
 }
+
 module.exports = diff
 
 
@@ -59208,8 +61576,9 @@ module.exports = gte
 
 const SemVer = __nccwpck_require__(8088)
 
-const inc = (version, release, options, identifier) => {
+const inc = (version, release, options, identifier, identifierBase) => {
   if (typeof (options) === 'string') {
+    identifierBase = identifier
     identifier = options
     options = undefined
   }
@@ -59218,7 +61587,7 @@ const inc = (version, release, options, identifier) => {
     return new SemVer(
       version instanceof SemVer ? version.version : version,
       options
-    ).inc(release, identifier).version
+    ).inc(release, identifier, identifierBase).version
   } catch (er) {
     return null
   }
@@ -59281,35 +61650,18 @@ module.exports = neq
 /***/ 5925:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
-const { MAX_LENGTH } = __nccwpck_require__(2293)
-const { re, t } = __nccwpck_require__(9523)
 const SemVer = __nccwpck_require__(8088)
-
-const parseOptions = __nccwpck_require__(785)
-const parse = (version, options) => {
-  options = parseOptions(options)
-
+const parse = (version, options, throwErrors = false) => {
   if (version instanceof SemVer) {
     return version
   }
-
-  if (typeof version !== 'string') {
-    return null
-  }
-
-  if (version.length > MAX_LENGTH) {
-    return null
-  }
-
-  const r = options.loose ? re[t.LOOSE] : re[t.FULL]
-  if (!r.test(version)) {
-    return null
-  }
-
   try {
     return new SemVer(version, options)
   } catch (er) {
-    return null
+    if (!throwErrors) {
+      return null
+    }
+    throw er
   }
 }
 
@@ -59489,6 +61841,7 @@ module.exports = {
   src: internalRe.src,
   tokens: internalRe.t,
   SEMVER_SPEC_VERSION: constants.SEMVER_SPEC_VERSION,
+  RELEASE_TYPES: constants.RELEASE_TYPES,
   compareIdentifiers: identifiers.compareIdentifiers,
   rcompareIdentifiers: identifiers.rcompareIdentifiers,
 }
@@ -59510,11 +61863,24 @@ const MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER ||
 // Max safe segment length for coercion.
 const MAX_SAFE_COMPONENT_LENGTH = 16
 
+const RELEASE_TYPES = [
+  'major',
+  'premajor',
+  'minor',
+  'preminor',
+  'patch',
+  'prepatch',
+  'prerelease',
+]
+
 module.exports = {
-  SEMVER_SPEC_VERSION,
   MAX_LENGTH,
-  MAX_SAFE_INTEGER,
   MAX_SAFE_COMPONENT_LENGTH,
+  MAX_SAFE_INTEGER,
+  RELEASE_TYPES,
+  SEMVER_SPEC_VERSION,
+  FLAG_INCLUDE_PRERELEASE: 0b001,
+  FLAG_LOOSE: 0b010,
 }
 
 
@@ -59569,16 +61935,20 @@ module.exports = {
 /***/ 785:
 /***/ ((module) => {
 
-// parse out just the options we care about so we always get a consistent
-// obj with keys in a consistent order.
-const opts = ['includePrerelease', 'loose', 'rtl']
-const parseOptions = options =>
-  !options ? {}
-  : typeof options !== 'object' ? { loose: true }
-  : opts.filter(k => options[k]).reduce((o, k) => {
-    o[k] = true
-    return o
-  }, {})
+// parse out just the options we care about
+const looseOption = Object.freeze({ loose: true })
+const emptyOpts = Object.freeze({ })
+const parseOptions = options => {
+  if (!options) {
+    return emptyOpts
+  }
+
+  if (typeof options !== 'object') {
+    return looseOption
+  }
+
+  return options
+}
 module.exports = parseOptions
 
 
@@ -59593,16 +61963,27 @@ exports = module.exports = {}
 
 // The actual regexps go on exports.re
 const re = exports.re = []
+const safeRe = exports.safeRe = []
 const src = exports.src = []
 const t = exports.t = {}
 let R = 0
 
 const createToken = (name, value, isGlobal) => {
+  // Replace all greedy whitespace to prevent regex dos issues. These regex are
+  // used internally via the safeRe object since all inputs in this library get
+  // normalized first to trim and collapse all extra whitespace. The original
+  // regexes are exported for userland consumption and lower level usage. A
+  // future breaking change could export the safer regex only with a note that
+  // all input should have extra whitespace removed.
+  const safe = value
+    .split('\\s*').join('\\s{0,1}')
+    .split('\\s+').join('\\s')
   const index = R++
   debug(name, index, value)
   t[name] = index
   src[index] = value
   re[index] = new RegExp(value, isGlobal ? 'g' : undefined)
+  safeRe[index] = new RegExp(safe, isGlobal ? 'g' : undefined)
 }
 
 // The following Regular Expressions can be used for tokenizing,
@@ -59791,7 +62172,7 @@ const Range = __nccwpck_require__(9828)
 const intersects = (r1, r2, options) => {
   r1 = new Range(r1, options)
   r2 = new Range(r2, options)
-  return r1.intersects(r2)
+  return r1.intersects(r2, options)
 }
 module.exports = intersects
 
@@ -60154,6 +62535,9 @@ const subset = (sub, dom, options = {}) => {
   return true
 }
 
+const minimumVersionWithPreRelease = [new Comparator('>=0.0.0-0')]
+const minimumVersion = [new Comparator('>=0.0.0')]
+
 const simpleSubset = (sub, dom, options) => {
   if (sub === dom) {
     return true
@@ -60163,9 +62547,9 @@ const simpleSubset = (sub, dom, options) => {
     if (dom.length === 1 && dom[0].semver === ANY) {
       return true
     } else if (options.includePrerelease) {
-      sub = [new Comparator('>=0.0.0-0')]
+      sub = minimumVersionWithPreRelease
     } else {
-      sub = [new Comparator('>=0.0.0')]
+      sub = minimumVersion
     }
   }
 
@@ -60173,7 +62557,7 @@ const simpleSubset = (sub, dom, options) => {
     if (options.includePrerelease) {
       return true
     } else {
-      dom = [new Comparator('>=0.0.0')]
+      dom = minimumVersion
     }
   }
 
@@ -66324,7 +68708,11 @@ try {
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -66469,7 +68857,11 @@ exports.CACHE_DEPENDENCY_BACKUP_PATH = '**/pyproject.toml';
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -66554,7 +68946,7 @@ class PipCache extends cache_distributor_1.default {
             let primaryKey = '';
             let restoreKey = '';
             if (utils_1.IS_LINUX) {
-                const osInfo = yield utils_1.getLinuxInfo();
+                const osInfo = yield (0, utils_1.getLinuxInfo)();
                 primaryKey = `${this.CACHE_KEY_PREFIX}-${process.env['RUNNER_OS']}-${osInfo.osVersion}-${osInfo.osName}-python-${this.pythonVersion}-${this.packageManager}-${hash}`;
                 restoreKey = `${this.CACHE_KEY_PREFIX}-${process.env['RUNNER_OS']}-${osInfo.osVersion}-${osInfo.osName}-python-${this.pythonVersion}-${this.packageManager}`;
             }
@@ -66581,7 +68973,11 @@ exports["default"] = PipCache;
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -66663,7 +69059,11 @@ exports["default"] = PipenvCache;
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -66715,30 +69115,37 @@ class PoetryCache extends cache_distributor_1.default {
         this.poetryProjects = poetryProjects;
     }
     getCacheGlobalDirectories() {
-        var e_1, _a;
+        var _a, e_1, _b, _c;
         return __awaiter(this, void 0, void 0, function* () {
             // Same virtualenvs path may appear for different projects, hence we use a Set
             const paths = new Set();
             const globber = yield glob.create(this.patterns);
             try {
-                for (var _b = __asyncValues(globber.globGenerator()), _c; _c = yield _b.next(), !_c.done;) {
-                    const file = _c.value;
-                    const basedir = path.dirname(file);
-                    core.debug(`Processing Poetry project at ${basedir}`);
-                    this.poetryProjects.add(basedir);
-                    const poetryConfig = yield this.getPoetryConfiguration(basedir);
-                    const cacheDir = poetryConfig['cache-dir'];
-                    const virtualenvsPath = poetryConfig['virtualenvs.path'].replace('{cache-dir}', cacheDir);
-                    paths.add(virtualenvsPath);
-                    if (poetryConfig['virtualenvs.in-project']) {
-                        paths.add(path.join(basedir, '.venv'));
+                for (var _d = true, _e = __asyncValues(globber.globGenerator()), _f; _f = yield _e.next(), _a = _f.done, !_a;) {
+                    _c = _f.value;
+                    _d = false;
+                    try {
+                        const file = _c;
+                        const basedir = path.dirname(file);
+                        core.debug(`Processing Poetry project at ${basedir}`);
+                        this.poetryProjects.add(basedir);
+                        const poetryConfig = yield this.getPoetryConfiguration(basedir);
+                        const cacheDir = poetryConfig['cache-dir'];
+                        const virtualenvsPath = poetryConfig['virtualenvs.path'].replace('{cache-dir}', cacheDir);
+                        paths.add(virtualenvsPath);
+                        if (poetryConfig['virtualenvs.in-project']) {
+                            paths.add(path.join(basedir, '.venv'));
+                        }
+                    }
+                    finally {
+                        _d = true;
                     }
                 }
             }
             catch (e_1_1) { e_1 = { error: e_1_1 }; }
             finally {
                 try {
-                    if (_c && !_c.done && (_a = _b.return)) yield _a.call(_b);
+                    if (!_d && !_a && (_b = _e.return)) yield _b.call(_e);
                 }
                 finally { if (e_1) throw e_1.error; }
             }
@@ -66770,13 +69177,13 @@ class PoetryCache extends cache_distributor_1.default {
                 core.debug(`pythonLocation is ${pythonLocation}`);
             }
             else {
-                utils_1.logWarning('python binaries were not found in PATH');
+                (0, utils_1.logWarning)('python binaries were not found in PATH');
                 return;
             }
             for (const poetryProject of this.poetryProjects) {
                 const { exitCode, stderr } = yield exec.getExecOutput('poetry', ['env', 'use', pythonLocation], { ignoreReturnCode: true, cwd: poetryProject });
                 if (exitCode) {
-                    utils_1.logWarning(stderr);
+                    (0, utils_1.logWarning)(stderr);
                 }
             }
         });
@@ -66803,6 +69210,136 @@ exports["default"] = PoetryCache;
 
 /***/ }),
 
+/***/ 8040:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseGraalPyVersion = exports.findGraalPyToolCache = exports.findGraalPyVersion = void 0;
+const path = __importStar(__nccwpck_require__(1017));
+const graalpyInstall = __importStar(__nccwpck_require__(8265));
+const utils_1 = __nccwpck_require__(1314);
+const semver = __importStar(__nccwpck_require__(1383));
+const core = __importStar(__nccwpck_require__(2186));
+const tc = __importStar(__nccwpck_require__(7784));
+function findGraalPyVersion(versionSpec, architecture, updateEnvironment, checkLatest, allowPreReleases) {
+    return __awaiter(this, void 0, void 0, function* () {
+        let resolvedGraalPyVersion = '';
+        let installDir;
+        let releases;
+        let graalpyVersionSpec = parseGraalPyVersion(versionSpec);
+        if (checkLatest) {
+            releases = yield graalpyInstall.getAvailableGraalPyVersions();
+            if (releases && releases.length > 0) {
+                const releaseData = graalpyInstall.findRelease(releases, graalpyVersionSpec, architecture, false);
+                if (releaseData) {
+                    core.info(`Resolved as GraalPy ${releaseData.resolvedGraalPyVersion}`);
+                    graalpyVersionSpec = releaseData.resolvedGraalPyVersion;
+                }
+                else {
+                    core.info(`Failed to resolve GraalPy ${graalpyVersionSpec} from manifest`);
+                }
+            }
+        }
+        ({ installDir, resolvedGraalPyVersion } = findGraalPyToolCache(graalpyVersionSpec, architecture));
+        if (!installDir) {
+            ({ installDir, resolvedGraalPyVersion } = yield graalpyInstall.installGraalPy(graalpyVersionSpec, architecture, allowPreReleases, releases));
+        }
+        const pipDir = utils_1.IS_WINDOWS ? 'Scripts' : 'bin';
+        const _binDir = path.join(installDir, pipDir);
+        const binaryExtension = utils_1.IS_WINDOWS ? '.exe' : '';
+        const pythonPath = path.join(utils_1.IS_WINDOWS ? installDir : _binDir, `python${binaryExtension}`);
+        const pythonLocation = (0, utils_1.getBinaryDirectory)(installDir);
+        if (updateEnvironment) {
+            core.exportVariable('pythonLocation', installDir);
+            // https://cmake.org/cmake/help/latest/module/FindPython.html#module:FindPython
+            core.exportVariable('Python_ROOT_DIR', installDir);
+            // https://cmake.org/cmake/help/latest/module/FindPython2.html#module:FindPython2
+            core.exportVariable('Python2_ROOT_DIR', installDir);
+            // https://cmake.org/cmake/help/latest/module/FindPython3.html#module:FindPython3
+            core.exportVariable('Python3_ROOT_DIR', installDir);
+            core.exportVariable('PKG_CONFIG_PATH', pythonLocation + '/lib/pkgconfig');
+            core.addPath(pythonLocation);
+            core.addPath(_binDir);
+        }
+        core.setOutput('python-version', 'graalpy' + resolvedGraalPyVersion);
+        core.setOutput('python-path', pythonPath);
+        return resolvedGraalPyVersion;
+    });
+}
+exports.findGraalPyVersion = findGraalPyVersion;
+function findGraalPyToolCache(graalpyVersion, architecture) {
+    let resolvedGraalPyVersion = '';
+    let installDir = tc.find('GraalPy', graalpyVersion, architecture);
+    if (installDir) {
+        // 'tc.find' finds tool based on Python version but we also need to check
+        // whether GraalPy version satisfies requested version.
+        resolvedGraalPyVersion = path.basename(path.dirname(installDir));
+        const isGraalPyVersionSatisfies = semver.satisfies(resolvedGraalPyVersion, graalpyVersion);
+        if (!isGraalPyVersionSatisfies) {
+            installDir = null;
+            resolvedGraalPyVersion = '';
+        }
+    }
+    if (!installDir) {
+        core.info(`GraalPy version ${graalpyVersion} was not found in the local cache`);
+    }
+    return { installDir, resolvedGraalPyVersion };
+}
+exports.findGraalPyToolCache = findGraalPyToolCache;
+function parseGraalPyVersion(versionSpec) {
+    const versions = versionSpec.split('-').filter(item => !!item);
+    if (/^(graalpy)(.+)/.test(versions[0])) {
+        const version = versions[0].replace('graalpy', '');
+        versions.splice(0, 1, 'graalpy', version);
+    }
+    if (versions.length < 2 || versions[0] != 'graalpy') {
+        throw new Error("Invalid 'version' property for GraalPy. GraalPy version should be specified as 'graalpy<python-version>' or 'graalpy-<python-version>'. See README for examples and documentation.");
+    }
+    const pythonVersion = versions[1];
+    if (!(0, utils_1.validateVersion)(pythonVersion)) {
+        throw new Error("Invalid 'version' property for GraalPy. GraalPy versions should satisfy SemVer notation. See README for examples and documentation.");
+    }
+    return pythonVersion;
+}
+exports.parseGraalPyVersion = parseGraalPyVersion;
+
+
+/***/ }),
+
 /***/ 4003:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -66810,7 +69347,11 @@ exports["default"] = PoetryCache;
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -66874,7 +69415,7 @@ function findPyPyVersion(versionSpec, architecture, updateEnvironment, checkLate
         const _binDir = path.join(installDir, pipDir);
         const binaryExtension = utils_1.IS_WINDOWS ? '.exe' : '';
         const pythonPath = path.join(utils_1.IS_WINDOWS ? installDir : _binDir, `python${binaryExtension}`);
-        const pythonLocation = pypyInstall.getPyPyBinaryPath(installDir);
+        const pythonLocation = (0, utils_1.getBinaryDirectory)(installDir);
         if (updateEnvironment) {
             core.exportVariable('pythonLocation', installDir);
             // https://cmake.org/cmake/help/latest/module/FindPython.html#module:FindPython
@@ -66902,8 +69443,8 @@ function findPyPyToolCache(pythonVersion, pypyVersion, architecture) {
     if (installDir) {
         // 'tc.find' finds tool based on Python version but we also need to check
         // whether PyPy version satisfies requested version.
-        resolvedPythonVersion = utils_1.getPyPyVersionFromPath(installDir);
-        resolvedPyPyVersion = utils_1.readExactPyPyVersionFile(installDir);
+        resolvedPythonVersion = (0, utils_1.getPyPyVersionFromPath)(installDir);
+        resolvedPyPyVersion = (0, utils_1.readExactPyPyVersionFile)(installDir);
         const isPyPyVersionSatisfies = semver.satisfies(resolvedPyPyVersion, pypyVersion);
         if (!isPyPyVersionSatisfies) {
             installDir = null;
@@ -66934,10 +69475,10 @@ function parsePyPyVersion(versionSpec) {
     else {
         pypyVersion = 'x';
     }
-    if (!utils_1.validateVersion(pythonVersion) || !utils_1.validateVersion(pypyVersion)) {
+    if (!(0, utils_1.validateVersion)(pythonVersion) || !(0, utils_1.validateVersion)(pypyVersion)) {
         throw new Error("Invalid 'version' property for PyPy. Both Python version and PyPy versions should satisfy SemVer notation. See README for examples and documentation.");
     }
-    if (!utils_1.validatePythonVersionFormatForPyPy(pythonVersion)) {
+    if (!(0, utils_1.validatePythonVersionFormatForPyPy)(pythonVersion)) {
         throw new Error("Invalid format of Python version for PyPy. Python version should be specified in format 'x.y'. See README for examples and documentation.");
     }
     return {
@@ -66963,7 +69504,11 @@ exports.findPyPyInstallDirForWindows = findPyPyInstallDirForWindows;
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -67000,7 +69545,7 @@ const core = __importStar(__nccwpck_require__(2186));
 const tc = __importStar(__nccwpck_require__(7784));
 // Python has "scripts" or "bin" directories where command-line tools that come with packages are installed.
 // This is where pip is, along with anything that pip installs.
-// There is a seperate directory for `pip install --user`.
+// There is a separate directory for `pip install --user`.
 //
 // For reference, these directories are as follows:
 //   macOS / Linux:
@@ -67047,7 +69592,7 @@ function useCpythonVersion(version, architecture, updateEnvironment, checkLatest
             }
         }
         if (!installDir) {
-            const osInfo = yield utils_1.getOSInfo();
+            const osInfo = yield (0, utils_1.getOSInfo)();
             throw new Error([
                 `The version '${version}' with architecture '${architecture}' was not found for ${osInfo
                     ? `${osInfo.osName} ${osInfo.osVersion}`
@@ -67131,14 +69676,18 @@ exports.pythonVersionToSemantic = pythonVersionToSemantic;
 
 /***/ }),
 
-/***/ 8168:
+/***/ 8265:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -67168,7 +69717,227 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.findAssetForMacOrLinux = exports.findAssetForWindows = exports.isArchPresentForMacOrLinux = exports.isArchPresentForWindows = exports.pypyVersionToSemantic = exports.getPyPyBinaryPath = exports.findRelease = exports.getAvailablePyPyVersions = exports.installPyPy = void 0;
+exports.findAsset = exports.toGraalPyArchitecture = exports.toGraalPyPlatform = exports.findRelease = exports.graalPyTagToVersion = exports.getAvailableGraalPyVersions = exports.installGraalPy = void 0;
+const os = __importStar(__nccwpck_require__(2037));
+const path = __importStar(__nccwpck_require__(1017));
+const core = __importStar(__nccwpck_require__(2186));
+const tc = __importStar(__nccwpck_require__(7784));
+const semver = __importStar(__nccwpck_require__(1383));
+const httpm = __importStar(__nccwpck_require__(9925));
+const exec = __importStar(__nccwpck_require__(1514));
+const fs_1 = __importDefault(__nccwpck_require__(7147));
+const utils_1 = __nccwpck_require__(1314);
+const TOKEN = core.getInput('token');
+const AUTH = !TOKEN ? undefined : `token ${TOKEN}`;
+function installGraalPy(graalpyVersion, architecture, allowPreReleases, releases) {
+    return __awaiter(this, void 0, void 0, function* () {
+        let downloadDir;
+        releases = releases !== null && releases !== void 0 ? releases : (yield getAvailableGraalPyVersions());
+        if (!releases || !releases.length) {
+            throw new Error('No release was found in GraalPy version.json');
+        }
+        let releaseData = findRelease(releases, graalpyVersion, architecture, false);
+        if (allowPreReleases && (!releaseData || !releaseData.foundAsset)) {
+            // check for pre-release
+            core.info([
+                `Stable GraalPy version ${graalpyVersion} with arch ${architecture} not found`,
+                `Trying pre-release versions`
+            ].join(os.EOL));
+            releaseData = findRelease(releases, graalpyVersion, architecture, true);
+        }
+        if (!releaseData || !releaseData.foundAsset) {
+            throw new Error(`GraalPy version ${graalpyVersion} with arch ${architecture} not found`);
+        }
+        const { foundAsset, resolvedGraalPyVersion } = releaseData;
+        const downloadUrl = `${foundAsset.browser_download_url}`;
+        core.info(`Downloading GraalPy from "${downloadUrl}" ...`);
+        try {
+            const graalpyPath = yield tc.downloadTool(downloadUrl, undefined, AUTH);
+            core.info('Extracting downloaded archive...');
+            downloadDir = yield tc.extractTar(graalpyPath);
+            // root folder in archive can have unpredictable name so just take the first folder
+            // downloadDir is unique folder under TEMP and can't contain any other folders
+            const archiveName = fs_1.default.readdirSync(downloadDir)[0];
+            const toolDir = path.join(downloadDir, archiveName);
+            let installDir = toolDir;
+            if (!(0, utils_1.isNightlyKeyword)(resolvedGraalPyVersion)) {
+                installDir = yield tc.cacheDir(toolDir, 'GraalPy', resolvedGraalPyVersion, architecture);
+            }
+            const binaryPath = (0, utils_1.getBinaryDirectory)(installDir);
+            yield createGraalPySymlink(binaryPath, resolvedGraalPyVersion);
+            yield installPip(binaryPath);
+            return { installDir, resolvedGraalPyVersion };
+        }
+        catch (err) {
+            if (err instanceof Error) {
+                // Rate limit?
+                if (err instanceof tc.HTTPError &&
+                    (err.httpStatusCode === 403 || err.httpStatusCode === 429)) {
+                    core.info(`Received HTTP status code ${err.httpStatusCode}.  This usually indicates the rate limit has been exceeded`);
+                }
+                else {
+                    core.info(err.message);
+                }
+                if (err.stack !== undefined) {
+                    core.debug(err.stack);
+                }
+            }
+            throw err;
+        }
+    });
+}
+exports.installGraalPy = installGraalPy;
+function getAvailableGraalPyVersions() {
+    return __awaiter(this, void 0, void 0, function* () {
+        const http = new httpm.HttpClient('tool-cache');
+        const headers = {};
+        if (AUTH) {
+            headers.authorization = AUTH;
+        }
+        let url = 'https://api.github.com/repos/oracle/graalpython/releases';
+        const result = [];
+        do {
+            const response = yield http.getJson(url, headers);
+            if (!response.result) {
+                throw new Error(`Unable to retrieve the list of available GraalPy versions from '${url}'`);
+            }
+            result.push(...response.result);
+            url = (0, utils_1.getNextPageUrl)(response);
+        } while (url);
+        return result;
+    });
+}
+exports.getAvailableGraalPyVersions = getAvailableGraalPyVersions;
+function createGraalPySymlink(graalpyBinaryPath, graalpyVersion) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const version = semver.coerce(graalpyVersion);
+        const pythonBinaryPostfix = semver.major(version);
+        const pythonMinor = semver.minor(version);
+        const graalpyMajorMinorBinaryPostfix = `${pythonBinaryPostfix}.${pythonMinor}`;
+        const binaryExtension = utils_1.IS_WINDOWS ? '.exe' : '';
+        core.info('Creating symlinks...');
+        (0, utils_1.createSymlinkInFolder)(graalpyBinaryPath, `graalpy${binaryExtension}`, `python${pythonBinaryPostfix}${binaryExtension}`, true);
+        (0, utils_1.createSymlinkInFolder)(graalpyBinaryPath, `graalpy${binaryExtension}`, `python${binaryExtension}`, true);
+        (0, utils_1.createSymlinkInFolder)(graalpyBinaryPath, `graalpy${binaryExtension}`, `graalpy${graalpyMajorMinorBinaryPostfix}${binaryExtension}`, true);
+    });
+}
+function installPip(pythonLocation) {
+    return __awaiter(this, void 0, void 0, function* () {
+        core.info("Installing pip (GraalPy doesn't update pip because it uses a patched version of pip)");
+        const pythonBinary = path.join(pythonLocation, 'python');
+        yield exec.exec(`${pythonBinary} -m ensurepip --default-pip`);
+    });
+}
+function graalPyTagToVersion(tag) {
+    const versionPattern = /.*-(\d+\.\d+\.\d+(?:\.\d+)?)((?:a|b|rc))?(\d*)?/;
+    const match = tag.match(versionPattern);
+    if (match && match[2]) {
+        return `${match[1]}-${match[2]}.${match[3]}`;
+    }
+    else if (match) {
+        return match[1];
+    }
+    else {
+        return tag.replace(/.*-/, '');
+    }
+}
+exports.graalPyTagToVersion = graalPyTagToVersion;
+function findRelease(releases, graalpyVersion, architecture, includePrerelease) {
+    const options = { includePrerelease: includePrerelease };
+    const filterReleases = releases.filter(item => {
+        const isVersionSatisfied = semver.satisfies(graalPyTagToVersion(item.tag_name), graalpyVersion, options);
+        return (isVersionSatisfied && !!findAsset(item, architecture, process.platform));
+    });
+    if (!filterReleases.length) {
+        return null;
+    }
+    const sortedReleases = filterReleases.sort((previous, current) => semver.compare(semver.coerce(graalPyTagToVersion(current.tag_name)), semver.coerce(graalPyTagToVersion(previous.tag_name))));
+    const foundRelease = sortedReleases[0];
+    const foundAsset = findAsset(foundRelease, architecture, process.platform);
+    return {
+        foundAsset,
+        resolvedGraalPyVersion: graalPyTagToVersion(foundRelease.tag_name)
+    };
+}
+exports.findRelease = findRelease;
+function toGraalPyPlatform(platform) {
+    switch (platform) {
+        case 'win32':
+            return 'windows';
+        case 'darwin':
+            return 'macos';
+    }
+    return platform;
+}
+exports.toGraalPyPlatform = toGraalPyPlatform;
+function toGraalPyArchitecture(architecture) {
+    switch (architecture) {
+        case 'x64':
+            return 'amd64';
+        case 'arm64':
+            return 'aarch64';
+    }
+    return architecture;
+}
+exports.toGraalPyArchitecture = toGraalPyArchitecture;
+function findAsset(item, architecture, platform) {
+    const graalpyArch = toGraalPyArchitecture(architecture);
+    const graalpyPlatform = toGraalPyPlatform(platform);
+    const found = item.assets.filter(file => file.name.startsWith('graalpy') &&
+        file.name.endsWith(`-${graalpyPlatform}-${graalpyArch}.tar.gz`));
+    /*
+    In the future there could be more variants of GraalPy for a single release. Pick the shortest name, that one is the most likely to be the primary variant.
+    */
+    found.sort((f1, f2) => f1.name.length - f2.name.length);
+    return found[0];
+}
+exports.findAsset = findAsset;
+
+
+/***/ }),
+
+/***/ 8168:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
+var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, generator) {
+    function adopt(value) { return value instanceof P ? value : new P(function (resolve) { resolve(value); }); }
+    return new (P || (P = Promise))(function (resolve, reject) {
+        function fulfilled(value) { try { step(generator.next(value)); } catch (e) { reject(e); } }
+        function rejected(value) { try { step(generator["throw"](value)); } catch (e) { reject(e); } }
+        function step(result) { result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected); }
+        step((generator = generator.apply(thisArg, _arguments || [])).next());
+    });
+};
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.findAssetForMacOrLinux = exports.findAssetForWindows = exports.isArchPresentForMacOrLinux = exports.isArchPresentForWindows = exports.pypyVersionToSemantic = exports.findRelease = exports.getAvailablePyPyVersions = exports.installPyPy = void 0;
 const os = __importStar(__nccwpck_require__(2037));
 const path = __importStar(__nccwpck_require__(1017));
 const core = __importStar(__nccwpck_require__(2186));
@@ -67214,11 +69983,11 @@ function installPyPy(pypyVersion, pythonVersion, architecture, allowPreReleases,
             const archiveName = fs_1.default.readdirSync(downloadDir)[0];
             const toolDir = path.join(downloadDir, archiveName);
             let installDir = toolDir;
-            if (!utils_1.isNightlyKeyword(resolvedPyPyVersion)) {
+            if (!(0, utils_1.isNightlyKeyword)(resolvedPyPyVersion)) {
                 installDir = yield tc.cacheDir(toolDir, 'PyPy', resolvedPythonVersion, architecture);
             }
-            utils_1.writeExactPyPyVersionFile(installDir, resolvedPyPyVersion);
-            const binaryPath = getPyPyBinaryPath(installDir);
+            (0, utils_1.writeExactPyPyVersionFile)(installDir, resolvedPyPyVersion);
+            const binaryPath = (0, utils_1.getBinaryDirectory)(installDir);
             yield createPyPySymlink(binaryPath, resolvedPythonVersion);
             yield installPip(binaryPath);
             return { installDir, resolvedPythonVersion, resolvedPyPyVersion };
@@ -67263,9 +70032,9 @@ function createPyPySymlink(pypyBinaryPath, pythonVersion) {
         const pypyMajorMinorBinaryPostfix = `${pythonBinaryPostfix}.${pythonMinor}`;
         const binaryExtension = utils_1.IS_WINDOWS ? '.exe' : '';
         core.info('Creating symlinks...');
-        utils_1.createSymlinkInFolder(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `python${pythonBinaryPostfix}${binaryExtension}`, true);
-        utils_1.createSymlinkInFolder(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `python${binaryExtension}`, true);
-        utils_1.createSymlinkInFolder(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `pypy${pypyMajorMinorBinaryPostfix}${binaryExtension}`, true);
+        (0, utils_1.createSymlinkInFolder)(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `python${pythonBinaryPostfix}${binaryExtension}`, true);
+        (0, utils_1.createSymlinkInFolder)(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `python${binaryExtension}`, true);
+        (0, utils_1.createSymlinkInFolder)(pypyBinaryPath, `pypy${pypyBinaryPostfix}${binaryExtension}`, `pypy${pypyMajorMinorBinaryPostfix}${binaryExtension}`, true);
     });
 }
 function installPip(pythonLocation) {
@@ -67280,7 +70049,7 @@ function findRelease(releases, pythonVersion, pypyVersion, architecture, include
     const options = { includePrerelease: includePrerelease };
     const filterReleases = releases.filter(item => {
         const isPythonVersionSatisfied = semver.satisfies(semver.coerce(item.python_version), pythonVersion);
-        const isPyPyNightly = utils_1.isNightlyKeyword(pypyVersion) && utils_1.isNightlyKeyword(item.pypy_version);
+        const isPyPyNightly = (0, utils_1.isNightlyKeyword)(pypyVersion) && (0, utils_1.isNightlyKeyword)(item.pypy_version);
         const isPyPyVersionSatisfied = isPyPyNightly ||
             semver.satisfies(pypyVersionToSemantic(item.pypy_version), pypyVersion, options);
         const isArchPresent = item.files &&
@@ -67307,15 +70076,6 @@ function findRelease(releases, pythonVersion, pypyVersion, architecture, include
     };
 }
 exports.findRelease = findRelease;
-/** Get PyPy binary location from the tool of installation directory
- *  - On Linux and macOS, the Python interpreter is in 'bin'.
- *  - On Windows, it is in the installation root.
- */
-function getPyPyBinaryPath(installDir) {
-    const _binDir = path.join(installDir, 'bin');
-    return utils_1.IS_WINDOWS ? installDir : _binDir;
-}
-exports.getPyPyBinaryPath = getPyPyBinaryPath;
 function pypyVersionToSemantic(versionSpec) {
     const prereleaseVersion = /(\d+\.\d+\.\d+)((?:a|b|rc))(\d*)/g;
     return versionSpec.replace(prereleaseVersion, '$1-$2.$3');
@@ -67357,7 +70117,11 @@ function replaceX32toX86(architecture) {
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -67481,7 +70245,11 @@ exports.installCpythonFromRelease = installCpythonFromRelease;
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -67514,6 +70282,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(2186));
 const finder = __importStar(__nccwpck_require__(9996));
 const finderPyPy = __importStar(__nccwpck_require__(4003));
+const finderGraalPy = __importStar(__nccwpck_require__(8040));
 const path = __importStar(__nccwpck_require__(1017));
 const os = __importStar(__nccwpck_require__(2037));
 const fs_1 = __importDefault(__nccwpck_require__(7147));
@@ -67522,38 +70291,50 @@ const utils_1 = __nccwpck_require__(1314);
 function isPyPyVersion(versionSpec) {
     return versionSpec.startsWith('pypy');
 }
+function isGraalPyVersion(versionSpec) {
+    return versionSpec.startsWith('graalpy');
+}
 function cacheDependencies(cache, pythonVersion) {
     return __awaiter(this, void 0, void 0, function* () {
         const cacheDependencyPath = core.getInput('cache-dependency-path') || undefined;
-        const cacheDistributor = cache_factory_1.getCacheDistributor(cache, pythonVersion, cacheDependencyPath);
+        const cacheDistributor = (0, cache_factory_1.getCacheDistributor)(cache, pythonVersion, cacheDependencyPath);
         yield cacheDistributor.restoreCache();
     });
 }
-function resolveVersionInput() {
-    const versions = core.getMultilineInput('python-version');
-    let versionFile = core.getInput('python-version-file');
-    if (versions.length && versionFile) {
-        core.warning('Both python-version and python-version-file inputs are specified, only python-version will be used.');
-    }
-    if (versions.length) {
-        return versions;
-    }
-    if (versionFile) {
-        if (!fs_1.default.existsSync(versionFile)) {
-            throw new Error(`The specified python version file at: ${versionFile} doesn't exist.`);
+function resolveVersionInputFromDefaultFile() {
+    const couples = [
+        ['.python-version', utils_1.getVersionInputFromPlainFile]
+    ];
+    for (const [versionFile, _fn] of couples) {
+        (0, utils_1.logWarning)(`Neither 'python-version' nor 'python-version-file' inputs were supplied. Attempting to find '${versionFile}' file.`);
+        if (fs_1.default.existsSync(versionFile)) {
+            return _fn(versionFile);
         }
-        const version = fs_1.default.readFileSync(versionFile, 'utf8');
-        core.info(`Resolved ${versionFile} as ${version}`);
-        return [version];
+        else {
+            (0, utils_1.logWarning)(`${versionFile} doesn't exist.`);
+        }
     }
-    utils_1.logWarning("Neither 'python-version' nor 'python-version-file' inputs were supplied. Attempting to find '.python-version' file.");
-    versionFile = '.python-version';
-    if (fs_1.default.existsSync(versionFile)) {
-        const version = fs_1.default.readFileSync(versionFile, 'utf8');
-        core.info(`Resolved ${versionFile} as ${version}`);
-        return [version];
+    return [];
+}
+function resolveVersionInput() {
+    let versions = core.getMultilineInput('python-version');
+    const versionFile = core.getInput('python-version-file');
+    if (versions.length) {
+        if (versionFile) {
+            core.warning('Both python-version and python-version-file inputs are specified, only python-version will be used.');
+        }
     }
-    utils_1.logWarning(`${versionFile} doesn't exist.`);
+    else {
+        if (versionFile) {
+            if (!fs_1.default.existsSync(versionFile)) {
+                throw new Error(`The specified python version file at: ${versionFile} doesn't exist.`);
+            }
+            versions = (0, utils_1.getVersionInputFromFile)(versionFile);
+        }
+        else {
+            versions = resolveVersionInputFromDefaultFile();
+        }
+    }
     return versions;
 }
 function run() {
@@ -67581,7 +70362,15 @@ function run() {
                         pythonVersion = `${installed.resolvedPyPyVersion}-${installed.resolvedPythonVersion}`;
                         core.info(`Successfully set up PyPy ${installed.resolvedPyPyVersion} with Python (${installed.resolvedPythonVersion})`);
                     }
+                    else if (isGraalPyVersion(version)) {
+                        const installed = yield finderGraalPy.findGraalPyVersion(version, arch, updateEnvironment, checkLatest, allowPreReleases);
+                        pythonVersion = `${installed}`;
+                        core.info(`Successfully set up GraalPy ${installed}`);
+                    }
                     else {
+                        if (version.startsWith('2')) {
+                            core.warning('The support for python 2.7 was removed on June 19, 2023. Related issue: https://github.com/actions/setup-python/issues/672');
+                        }
                         const installed = yield finder.useCpythonVersion(version, arch, updateEnvironment, checkLatest, allowPreReleases);
                         pythonVersion = installed.version;
                         core.info(`Successfully set up ${installed.impl} (${pythonVersion})`);
@@ -67589,7 +70378,7 @@ function run() {
                 }
                 core.endGroup();
                 const cache = core.getInput('cache');
-                if (cache && utils_1.isCacheFeatureAvailable()) {
+                if (cache && (0, utils_1.isCacheFeatureAvailable)()) {
                     yield cacheDependencies(cache, pythonVersion);
                 }
             }
@@ -67616,7 +70405,11 @@ run();
 
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -67646,13 +70439,14 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.getOSInfo = exports.getLinuxInfo = exports.logWarning = exports.isCacheFeatureAvailable = exports.isGhes = exports.validatePythonVersionFormatForPyPy = exports.writeExactPyPyVersionFile = exports.readExactPyPyVersionFile = exports.getPyPyVersionFromPath = exports.isNightlyKeyword = exports.validateVersion = exports.createSymlinkInFolder = exports.WINDOWS_PLATFORMS = exports.WINDOWS_ARCHS = exports.IS_MAC = exports.IS_LINUX = exports.IS_WINDOWS = void 0;
+exports.getNextPageUrl = exports.getBinaryDirectory = exports.getVersionInputFromFile = exports.getVersionInputFromPlainFile = exports.getVersionInputFromTomlFile = exports.getOSInfo = exports.getLinuxInfo = exports.logWarning = exports.isCacheFeatureAvailable = exports.isGhes = exports.validatePythonVersionFormatForPyPy = exports.writeExactPyPyVersionFile = exports.readExactPyPyVersionFile = exports.getPyPyVersionFromPath = exports.isNightlyKeyword = exports.validateVersion = exports.createSymlinkInFolder = exports.WINDOWS_PLATFORMS = exports.WINDOWS_ARCHS = exports.IS_MAC = exports.IS_LINUX = exports.IS_WINDOWS = void 0;
 /* eslint no-unsafe-finally: "off" */
 const cache = __importStar(__nccwpck_require__(7799));
 const core = __importStar(__nccwpck_require__(2186));
 const fs_1 = __importDefault(__nccwpck_require__(7147));
 const path = __importStar(__nccwpck_require__(1017));
 const semver = __importStar(__nccwpck_require__(1383));
+const toml = __importStar(__nccwpck_require__(2901));
 const exec = __importStar(__nccwpck_require__(1514));
 exports.IS_WINDOWS = process.platform === 'win32';
 exports.IS_LINUX = process.platform === 'linux';
@@ -67711,7 +70505,7 @@ function writeExactPyPyVersionFile(installDir, resolvedPyPyVersion) {
 }
 exports.writeExactPyPyVersionFile = writeExactPyPyVersionFile;
 /**
- * Python version should be specified explicitly like "x.y" (2.7, 3.6, 3.7)
+ * Python version should be specified explicitly like "x.y" (3.10, 3.11, etc)
  * "3.x" or "3" are not supported
  * because it could cause ambiguity when both PyPy version and Python version are not precise
  */
@@ -67795,6 +70589,116 @@ function getOSInfo() {
     });
 }
 exports.getOSInfo = getOSInfo;
+/**
+ * Extract a value from an object by following the keys path provided.
+ * If the value is present, it is returned. Otherwise undefined is returned.
+ */
+function extractValue(obj, keys) {
+    if (keys.length > 0) {
+        const value = obj[keys[0]];
+        if (keys.length > 1 && value !== undefined) {
+            return extractValue(value, keys.slice(1));
+        }
+        else {
+            return value;
+        }
+    }
+    else {
+        return;
+    }
+}
+/**
+ * Python version extracted from the TOML file.
+ * If the `project` key is present at the root level, the version is assumed to
+ * be specified according to PEP 621 in `project.requires-python`.
+ * Otherwise, if the `tool` key is present at the root level, the version is
+ * assumed to be specified using poetry under `tool.poetry.dependencies.python`.
+ * If none is present, returns an empty list.
+ */
+function getVersionInputFromTomlFile(versionFile) {
+    core.debug(`Trying to resolve version form ${versionFile}`);
+    const pyprojectFile = fs_1.default.readFileSync(versionFile, 'utf8');
+    const pyprojectConfig = toml.parse(pyprojectFile);
+    let keys = [];
+    if ('project' in pyprojectConfig) {
+        // standard project metadata (PEP 621)
+        keys = ['project', 'requires-python'];
+    }
+    else {
+        // python poetry
+        keys = ['tool', 'poetry', 'dependencies', 'python'];
+    }
+    const versions = [];
+    const version = extractValue(pyprojectConfig, keys);
+    if (version !== undefined) {
+        versions.push(version);
+    }
+    core.info(`Extracted ${versions} from ${versionFile}`);
+    const rawVersions = Array.from(versions, version => version.split(',').join(' '));
+    const validatedVersions = rawVersions
+        .map(item => semver.validRange(item, true))
+        .filter((versionRange, index) => {
+        if (!versionRange) {
+            core.debug(`The version ${rawVersions[index]} is not valid SemVer range`);
+        }
+        return !!versionRange;
+    });
+    return validatedVersions;
+}
+exports.getVersionInputFromTomlFile = getVersionInputFromTomlFile;
+/**
+ * Python version extracted from a plain text file.
+ */
+function getVersionInputFromPlainFile(versionFile) {
+    core.debug(`Trying to resolve version form ${versionFile}`);
+    const version = fs_1.default.readFileSync(versionFile, 'utf8').trim();
+    core.info(`Resolved ${versionFile} as ${version}`);
+    return [version];
+}
+exports.getVersionInputFromPlainFile = getVersionInputFromPlainFile;
+/**
+ * Python version extracted from a plain or TOML file.
+ */
+function getVersionInputFromFile(versionFile) {
+    if (versionFile.endsWith('.toml')) {
+        return getVersionInputFromTomlFile(versionFile);
+    }
+    else {
+        return getVersionInputFromPlainFile(versionFile);
+    }
+}
+exports.getVersionInputFromFile = getVersionInputFromFile;
+/**
+ * Get the directory containing interpreter binary from installation directory of PyPy or GraalPy
+ *  - On Linux and macOS, the Python interpreter is in 'bin'.
+ *  - On Windows, it is in the installation root.
+ */
+function getBinaryDirectory(installDir) {
+    return exports.IS_WINDOWS ? installDir : path.join(installDir, 'bin');
+}
+exports.getBinaryDirectory = getBinaryDirectory;
+/**
+ * Extract next page URL from a HTTP response "link" header. Such headers are used in GitHub APIs.
+ */
+function getNextPageUrl(response) {
+    const responseHeaders = response.headers;
+    const linkHeader = responseHeaders.link;
+    if (typeof linkHeader === 'string') {
+        for (const link of linkHeader.split(/\s*,\s*/)) {
+            const match = link.match(/<([^>]+)>(.*)/);
+            if (match) {
+                const url = match[1];
+                for (const param of match[2].split(/\s*;\s*/)) {
+                    if (param.match(/rel="?next"?/)) {
+                        return url;
+                    }
+                }
+            }
+        }
+    }
+    return null;
+}
+exports.getNextPageUrl = getNextPageUrl;
 
 
 /***/ }),

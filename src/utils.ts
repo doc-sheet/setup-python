@@ -4,7 +4,9 @@ import * as core from '@actions/core';
 import fs from 'fs';
 import * as path from 'path';
 import * as semver from 'semver';
+import * as toml from '@iarna/toml';
 import * as exec from '@actions/exec';
+import * as ifm from '@actions/http-client/interfaces';
 
 export const IS_WINDOWS = process.platform === 'win32';
 export const IS_LINUX = process.platform === 'linux';
@@ -26,6 +28,16 @@ export interface IPyPyManifestRelease {
   stable: boolean;
   latest_pypy: boolean;
   files: IPyPyManifestAsset[];
+}
+
+export interface IGraalPyManifestAsset {
+  name: string;
+  browser_download_url: string;
+}
+
+export interface IGraalPyManifestRelease {
+  tag_name: string;
+  assets: IGraalPyManifestAsset[];
 }
 
 /** create Symlinks for downloaded PyPy
@@ -89,7 +101,7 @@ export function writeExactPyPyVersionFile(
 }
 
 /**
- * Python version should be specified explicitly like "x.y" (2.7, 3.6, 3.7)
+ * Python version should be specified explicitly like "x.y" (3.10, 3.11, etc)
  * "3.x" or "3" are not supported
  * because it could cause ambiguity when both PyPy version and Python version are not precise
  */
@@ -180,4 +192,119 @@ export async function getOSInfo() {
   } finally {
     return osInfo;
   }
+}
+
+/**
+ * Extract a value from an object by following the keys path provided.
+ * If the value is present, it is returned. Otherwise undefined is returned.
+ */
+function extractValue(obj: any, keys: string[]): string | undefined {
+  if (keys.length > 0) {
+    const value = obj[keys[0]];
+    if (keys.length > 1 && value !== undefined) {
+      return extractValue(value, keys.slice(1));
+    } else {
+      return value;
+    }
+  } else {
+    return;
+  }
+}
+
+/**
+ * Python version extracted from the TOML file.
+ * If the `project` key is present at the root level, the version is assumed to
+ * be specified according to PEP 621 in `project.requires-python`.
+ * Otherwise, if the `tool` key is present at the root level, the version is
+ * assumed to be specified using poetry under `tool.poetry.dependencies.python`.
+ * If none is present, returns an empty list.
+ */
+export function getVersionInputFromTomlFile(versionFile: string): string[] {
+  core.debug(`Trying to resolve version form ${versionFile}`);
+
+  const pyprojectFile = fs.readFileSync(versionFile, 'utf8');
+  const pyprojectConfig = toml.parse(pyprojectFile);
+  let keys = [];
+
+  if ('project' in pyprojectConfig) {
+    // standard project metadata (PEP 621)
+    keys = ['project', 'requires-python'];
+  } else {
+    // python poetry
+    keys = ['tool', 'poetry', 'dependencies', 'python'];
+  }
+  const versions = [];
+  const version = extractValue(pyprojectConfig, keys);
+  if (version !== undefined) {
+    versions.push(version);
+  }
+
+  core.info(`Extracted ${versions} from ${versionFile}`);
+  const rawVersions = Array.from(versions, version =>
+    version.split(',').join(' ')
+  );
+  const validatedVersions = rawVersions
+    .map(item => semver.validRange(item, true))
+    .filter((versionRange, index) => {
+      if (!versionRange) {
+        core.debug(
+          `The version ${rawVersions[index]} is not valid SemVer range`
+        );
+      }
+
+      return !!versionRange;
+    }) as string[];
+  return validatedVersions;
+}
+
+/**
+ * Python version extracted from a plain text file.
+ */
+export function getVersionInputFromPlainFile(versionFile: string): string[] {
+  core.debug(`Trying to resolve version form ${versionFile}`);
+  const version = fs.readFileSync(versionFile, 'utf8').trim();
+  core.info(`Resolved ${versionFile} as ${version}`);
+  return [version];
+}
+
+/**
+ * Python version extracted from a plain or TOML file.
+ */
+export function getVersionInputFromFile(versionFile: string): string[] {
+  if (versionFile.endsWith('.toml')) {
+    return getVersionInputFromTomlFile(versionFile);
+  } else {
+    return getVersionInputFromPlainFile(versionFile);
+  }
+}
+
+/**
+ * Get the directory containing interpreter binary from installation directory of PyPy or GraalPy
+ *  - On Linux and macOS, the Python interpreter is in 'bin'.
+ *  - On Windows, it is in the installation root.
+ */
+export function getBinaryDirectory(installDir: string) {
+  return IS_WINDOWS ? installDir : path.join(installDir, 'bin');
+}
+
+/**
+ * Extract next page URL from a HTTP response "link" header. Such headers are used in GitHub APIs.
+ */
+export function getNextPageUrl<T>(response: ifm.ITypedResponse<T>) {
+  const responseHeaders = <ifm.IHeaders>response.headers;
+  const linkHeader = responseHeaders.link;
+  if (typeof linkHeader === 'string') {
+    for (const link of linkHeader.split(/\s*,\s*/)) {
+      const match = link.match(/<([^>]+)>(.*)/);
+      if (match) {
+        const url = match[1];
+        for (const param of match[2].split(/\s*;\s*/)) {
+          if (param.match(/rel="?next"?/)) {
+            return url;
+          }
+        }
+      }
+    }
+  }
+  return null;
 }
