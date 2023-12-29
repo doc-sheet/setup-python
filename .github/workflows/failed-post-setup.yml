@@ -1,5 +1,5 @@
 ---
-on:
+'on':
   pull_request:
     branches: ["main"]
 
@@ -19,6 +19,4 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
-      # true if cache-hit occured on the primary key
       - run: echo '${{ steps.pynstall.outputs.cache-hit }}'
-
